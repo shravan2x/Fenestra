@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>Fenestra.App</RootNamespace>
+    <AssemblyName>Fenestra.App</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Fenestra.Server\Fenestra.Server.csproj" />
+    <ProjectReference Include="..\Fenestra.Transport\Fenestra.Transport.csproj" />
+    <ProjectReference Include="..\Fenestra.NativeHost.Abstractions\Fenestra.NativeHost.Abstractions.csproj" />
+    <ProjectReference Include="..\Fenestra.NativeHost.Win32\Fenestra.NativeHost.Win32.csproj" />
+  </ItemGroup>
+</Project>

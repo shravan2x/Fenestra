@@ -1,0 +1,7 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <ProjectReference Include="..\Fenestra.NativeHost.Abstractions\Fenestra.NativeHost.Abstractions.csproj" />
+    <ProjectReference Include="..\Fenestra.Protocol.X11\Fenestra.Protocol.X11.csproj" />
+    <ProjectReference Include="..\Fenestra.Transport\Fenestra.Transport.csproj" />
+  </ItemGroup>
+</Project>

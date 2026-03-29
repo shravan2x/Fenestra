@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <RootNamespace>Fenestra.NativeHost.Win32</RootNamespace>
+    <AssemblyName>Fenestra.NativeHost.Win32</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Fenestra.NativeHost.Abstractions\Fenestra.NativeHost.Abstractions.csproj" />
+  </ItemGroup>
+</Project>

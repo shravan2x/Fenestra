@@ -1,0 +1,6 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <AssemblyName>Fenestra.Protocol.X11</AssemblyName>
+    <RootNamespace>Fenestra.Protocol.X11</RootNamespace>
+  </PropertyGroup>
+</Project>
