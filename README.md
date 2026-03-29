@@ -33,7 +33,7 @@ shared .NET build settings in `Directory.Build.props` and editor preferences in
 
 This cloud environment does not currently have the .NET SDK installed, so the
 project files were bootstrapped by hand. Build and run locally in Visual Studio
-once the .NET 8 SDK is available.
+once the .NET 10 SDK is available.
 
 ## Suggested first milestone
 
