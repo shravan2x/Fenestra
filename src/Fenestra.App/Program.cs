@@ -15,7 +15,7 @@ Console.WriteLine("Fenestra bootstrap starting.");
 Console.WriteLine($"Display :{options.DisplayNumber} on {options.ListenAddress}:{options.Port}");
 Console.WriteLine("Native host: Win32");
 Console.WriteLine();
-Console.WriteLine("This starter host does not yet accept X11 clients.");
-Console.WriteLine("See docs/architecture.md and docs/roadmap.md for the implementation plan.");
+Console.WriteLine("Phase 1 transport listener and X11 setup handshake are enabled.");
+Console.WriteLine("Connect an X11 client to exercise the setup path.");
 
 await server.StartAsync(options);

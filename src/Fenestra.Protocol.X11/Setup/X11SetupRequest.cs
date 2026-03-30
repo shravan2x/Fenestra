@@ -5,4 +5,6 @@ public sealed record X11SetupRequest(
     ushort ProtocolMajorVersion,
     ushort ProtocolMinorVersion,
     ushort AuthorizationProtocolNameLength,
-    ushort AuthorizationProtocolDataLength);
+    ushort AuthorizationProtocolDataLength,
+    string AuthorizationProtocolName,
+    byte[] AuthorizationProtocolData);
