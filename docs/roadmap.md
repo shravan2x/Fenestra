@@ -6,6 +6,12 @@ that can be tested before moving on.
 
 ## Phase 0 - Bootstrap
 
+Status: complete.
+
+Notes:
+- Repository structure, solution layout, and architecture/planning docs exist.
+- The bootstrap host has been replaced by a functioning transport/server scaffold.
+
 Goal:
 - Establish the repository layout and solution structure.
 - Clarify subsystem boundaries before protocol work begins.
@@ -16,6 +22,12 @@ Deliverables:
 - Basic application host that documents intended startup flow.
 
 ## Phase 1 - Learn the X11 connection lifecycle
+
+Status: complete.
+
+Notes:
+- The server accepts TCP client connections, parses setup requests, and returns setup replies.
+- Little-endian and big-endian setup flows are covered by focused automated tests.
 
 Goal:
 - Build the minimum server that accepts a client connection and parses the setup request.
@@ -38,6 +50,12 @@ Suggested validation:
 
 ## Phase 2 - Core object model and resource tracking
 
+Status: partially complete.
+
+Notes:
+- Implemented: per-client state, XID allocation, root window/screen/visual defaults, atom table, and some focus/event state.
+- Missing relative to the full phase intent: broader server object model coverage for windows beyond root, properties, colormaps, cursors, and richer ownership/state validation.
+
 Goal:
 - Represent the server-side state needed by real X11 clients.
 
@@ -58,6 +76,12 @@ Suggested validation:
 - Golden tests for atom and property behavior.
 
 ## Phase 3 - Request dispatch and minimal usable windowing
+
+Status: partially complete.
+
+Notes:
+- Implemented: opcode dispatch, error generation, `InternAtom`, `QueryTree`, `GetGeometry`, `SelectInput`, and some focus-related requests.
+- Missing relative to the full phase intent: `CreateWindow`, `DestroyWindow`, `MapWindow`, `UnmapWindow`, `ConfigureWindow`, `ReparentWindow`, `ChangeProperty`, `GetProperty`, and a real window tree beyond the root window.
 
 Goal:
 - Support the subset of requests needed for basic clients to create and manage windows.
@@ -88,6 +112,12 @@ Suggested validation:
 
 ## Phase 4 - Native window hosting on Windows
 
+Status: partially complete.
+
+Notes:
+- Implemented: native host abstraction, server-side native window coordinator, Win32 host lifecycle methods, and bootstrap/root host window wiring.
+- Missing relative to the full phase intent: mapped non-root X11 top-level windows affecting the native host via `MapWindow` / `ConfigureWindow`, plus host actions flowing back into real X11 window lifecycle behavior.
+
 Goal:
 - Make mapped X11 top-level windows appear as real Win32 windows with normal frame controls.
 
@@ -112,6 +142,13 @@ Suggested validation:
 - Moving and resizing the native window updates the X11-side geometry.
 
 ## Phase 5 - Drawing and presentation
+
+Status: partially complete.
+
+Notes:
+- Implemented: software framebuffer for the root drawable, pixmaps, minimal graphics contexts, `CreatePixmap`, `FreePixmap`, `CreateGC`, `FreeGC`, `PutImage`, and `GetImage`.
+- Implemented: root framebuffer presentation hook through the native host substrate.
+- Missing relative to the full phase intent: `CopyArea`, richer GC/raster-op semantics, broader drawable/window presentation, and a fuller compositor/blitter story.
 
 Goal:
 - Render actual window contents rather than only window metadata.
@@ -138,6 +175,12 @@ Suggested validation:
 
 ## Phase 6 - Events, input, and window manager behavior
 
+Status: partially complete.
+
+Notes:
+- Implemented: root-level `SelectInput`, `SetInputFocus`, `GetInputFocus`, queued outbound event delivery, host-input translation into key/button/motion/focus events, and event-mask gating.
+- Missing relative to the full phase intent: window-specific input beyond the root, enter/leave/configure events tied to real window lifecycle, grabs, clipboard/selections, and broader window-manager behavior.
+
 Goal:
 - Handle user interaction well enough for real applications.
 
@@ -159,6 +202,8 @@ Suggested validation:
 
 ## Phase 7 - Compatibility and extensions
 
+Status: not started.
+
 Goal:
 - Expand support to the X11 features that common applications expect.
 
@@ -174,6 +219,11 @@ Note:
 - Do not attempt every extension early. Build based on target applications and observed failures.
 
 ## Phase 8 - Wayland strategy
+
+Status: planning only.
+
+Notes:
+- The roadmap still describes long-term architectural options, but there is no Wayland implementation yet.
 
 There are several viable directions. Pick one based on your long-term goals.
 
