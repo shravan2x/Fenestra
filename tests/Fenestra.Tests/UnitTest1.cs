@@ -484,6 +484,145 @@ public sealed class X11StateAndHandshakeTests
         await serverTask;
     }
 
+    [Theory]
+    [InlineData(ByteOrder.LittleEndian)]
+    [InlineData(ByteOrder.BigEndian)]
+    public async Task RequestLoop_CreatePixmapPutImageGetImage_RoundTripsPixels(ByteOrder byteOrder)
+    {
+        using var cancellationTokenSource = new CancellationTokenSource();
+        var options = new X11ServerOptions(
+            DisplayNumber: 14,
+            ListenAddress: "127.0.0.1",
+            Port: 0,
+            EnableNativeWindows: false);
+        var transport = new TcpDisplayEndpoint(options.ListenAddress, options.Port, options.DisplayNumber);
+        var server = new X11Server(
+            transport,
+            new FakeNativeWindowHost(),
+            X11ServerHandshakeConfiguration.CreateDefault());
+        var serverTask = server.StartAsync(options, cancellationTokenSource.Token);
+
+        await WaitForBoundPortAsync(transport);
+
+        using var client = new TcpClient();
+        await client.ConnectAsync("127.0.0.1", transport.BoundPort);
+
+        await using var stream = client.GetStream();
+        await CompleteHandshakeAsync(stream, byteOrder);
+
+        await stream.WriteAsync(BuildCreatePixmapRequest(byteOrder, pixmapId: 0x0020_0001, drawableId: 1, width: 2, height: 2, depth: 24));
+        await stream.FlushAsync();
+
+        await stream.WriteAsync(BuildCreateGraphicsContextRequest(byteOrder, graphicsContextId: 0x0020_0002, drawableId: 0x0020_0001));
+        await stream.FlushAsync();
+
+        var imageBytes = new byte[]
+        {
+            0x10, 0x20, 0x30, 0x00,
+            0x40, 0x50, 0x60, 0x00,
+            0x70, 0x80, 0x90, 0x00,
+            0xA0, 0xB0, 0xC0, 0x00
+        };
+
+        await stream.WriteAsync(BuildPutImageRequest(
+            byteOrder,
+            drawableId: 0x0020_0001,
+            graphicsContextId: 0x0020_0002,
+            width: 2,
+            height: 2,
+            dstX: 0,
+            dstY: 0,
+            depth: 24,
+            imageBytes: imageBytes));
+        await stream.FlushAsync();
+
+        await stream.WriteAsync(BuildGetImageRequest(
+            byteOrder,
+            drawableId: 0x0020_0001,
+            x: 0,
+            y: 0,
+            width: 2,
+            height: 2));
+        await stream.FlushAsync();
+
+        var reply = await ReadReplyOrErrorAsync(stream, byteOrder);
+
+        Assert.Equal(1, reply[0]);
+        Assert.Equal(24, reply[1]);
+        Assert.Equal((ushort)4, ReadUInt16(reply.AsSpan(2, 2), byteOrder));
+        Assert.Equal(33u, ReadUInt32(reply.AsSpan(8, 4), byteOrder));
+        Assert.Equal(imageBytes, reply.AsSpan(32).ToArray());
+
+        cancellationTokenSource.Cancel();
+        await serverTask;
+    }
+
+    [Theory]
+    [InlineData(ByteOrder.LittleEndian)]
+    [InlineData(ByteOrder.BigEndian)]
+    public async Task RequestLoop_PutImageToRoot_PresentsRootFramebuffer(ByteOrder byteOrder)
+    {
+        using var cancellationTokenSource = new CancellationTokenSource();
+        var host = new RecordingNativeWindowHost();
+        var options = new X11ServerOptions(
+            DisplayNumber: 15,
+            ListenAddress: "127.0.0.1",
+            Port: 0,
+            EnableNativeWindows: true);
+        var transport = new TcpDisplayEndpoint(options.ListenAddress, options.Port, options.DisplayNumber);
+        var server = new X11Server(
+            transport,
+            host,
+            X11ServerHandshakeConfiguration.CreateDefault());
+        var serverTask = server.StartAsync(options, cancellationTokenSource.Token);
+
+        await WaitForBoundPortAsync(transport);
+
+        using var client = new TcpClient();
+        await client.ConnectAsync("127.0.0.1", transport.BoundPort);
+
+        await using var stream = client.GetStream();
+        await CompleteHandshakeAsync(stream, byteOrder);
+
+        await stream.WriteAsync(BuildCreateGraphicsContextRequest(byteOrder, graphicsContextId: 0x0020_0004, drawableId: 1));
+        await stream.FlushAsync();
+
+        var imageBytes = new byte[]
+        {
+            0x01, 0x02, 0x03, 0x00,
+            0x04, 0x05, 0x06, 0x00,
+            0x07, 0x08, 0x09, 0x00,
+            0x0A, 0x0B, 0x0C, 0x00
+        };
+
+        await stream.WriteAsync(BuildPutImageRequest(
+            byteOrder,
+            drawableId: 1,
+            graphicsContextId: 0x0020_0004,
+            width: 2,
+            height: 2,
+            dstX: 0,
+            dstY: 0,
+            depth: 24,
+            imageBytes: imageBytes));
+        await stream.FlushAsync();
+
+        await Task.Delay(50);
+
+        Assert.NotEmpty(host.PresentedFrames);
+        Assert.Equal((uint)1, host.PresentedFrames[^1].Handle.WindowId);
+        Assert.Equal(1024, host.PresentedFrames[^1].Framebuffer.Width);
+        Assert.Equal(768, host.PresentedFrames[^1].Framebuffer.Height);
+
+        var presentedPixels = host.PresentedFrames[^1].Framebuffer.Pixels;
+        var stride = host.PresentedFrames[^1].Framebuffer.Stride;
+        Assert.Equal(imageBytes.AsSpan(0, 8).ToArray(), presentedPixels.Slice(0, 8).ToArray());
+        Assert.Equal(imageBytes.AsSpan(8, 8).ToArray(), presentedPixels.Slice(stride, 8).ToArray());
+
+        cancellationTokenSource.Cancel();
+        await serverTask;
+    }
+
     private static async Task WaitForBoundPortAsync(TcpDisplayEndpoint transport)
     {
         for (var attempt = 0; attempt < 50; attempt++)
@@ -650,6 +789,87 @@ public sealed class X11StateAndHandshakeTests
         return buffer;
     }
 
+    private static byte[] BuildCreatePixmapRequest(
+        ByteOrder byteOrder,
+        uint pixmapId,
+        uint drawableId,
+        ushort width,
+        ushort height,
+        byte depth)
+    {
+        var buffer = new byte[16];
+        buffer[0] = 53;
+        buffer[1] = depth;
+        WriteUInt16(buffer.AsSpan(2, 2), 4, byteOrder);
+        WriteUInt32(buffer.AsSpan(4, 4), pixmapId, byteOrder);
+        WriteUInt32(buffer.AsSpan(8, 4), drawableId, byteOrder);
+        WriteUInt16(buffer.AsSpan(12, 2), width, byteOrder);
+        WriteUInt16(buffer.AsSpan(14, 2), height, byteOrder);
+        return buffer;
+    }
+
+    private static byte[] BuildCreateGraphicsContextRequest(
+        ByteOrder byteOrder,
+        uint graphicsContextId,
+        uint drawableId)
+    {
+        var buffer = new byte[12];
+        buffer[0] = 55;
+        buffer[1] = 0;
+        WriteUInt16(buffer.AsSpan(2, 2), 3, byteOrder);
+        WriteUInt32(buffer.AsSpan(4, 4), graphicsContextId, byteOrder);
+        WriteUInt32(buffer.AsSpan(8, 4), drawableId, byteOrder);
+        return buffer;
+    }
+
+    private static byte[] BuildPutImageRequest(
+        ByteOrder byteOrder,
+        uint drawableId,
+        uint graphicsContextId,
+        ushort width,
+        ushort height,
+        short dstX,
+        short dstY,
+        byte depth,
+        byte[] imageBytes)
+    {
+        var buffer = new byte[24 + imageBytes.Length];
+        buffer[0] = 72;
+        buffer[1] = 2;
+        WriteUInt16(buffer.AsSpan(2, 2), (ushort)(buffer.Length / 4), byteOrder);
+        WriteUInt32(buffer.AsSpan(4, 4), drawableId, byteOrder);
+        WriteUInt32(buffer.AsSpan(8, 4), graphicsContextId, byteOrder);
+        WriteUInt16(buffer.AsSpan(12, 2), width, byteOrder);
+        WriteUInt16(buffer.AsSpan(14, 2), height, byteOrder);
+        WriteUInt16(buffer.AsSpan(16, 2), unchecked((ushort)dstX), byteOrder);
+        WriteUInt16(buffer.AsSpan(18, 2), unchecked((ushort)dstY), byteOrder);
+        buffer[20] = 0;
+        buffer[21] = depth;
+        imageBytes.CopyTo(buffer.AsSpan(24));
+        return buffer;
+    }
+
+    private static byte[] BuildGetImageRequest(
+        ByteOrder byteOrder,
+        uint drawableId,
+        short x,
+        short y,
+        ushort width,
+        ushort height)
+    {
+        var buffer = new byte[20];
+        buffer[0] = 73;
+        buffer[1] = 2;
+        WriteUInt16(buffer.AsSpan(2, 2), 5, byteOrder);
+        WriteUInt32(buffer.AsSpan(4, 4), drawableId, byteOrder);
+        WriteUInt16(buffer.AsSpan(8, 2), unchecked((ushort)x), byteOrder);
+        WriteUInt16(buffer.AsSpan(10, 2), unchecked((ushort)y), byteOrder);
+        WriteUInt16(buffer.AsSpan(12, 2), width, byteOrder);
+        WriteUInt16(buffer.AsSpan(14, 2), height, byteOrder);
+        WriteUInt32(buffer.AsSpan(16, 4), uint.MaxValue, byteOrder);
+        return buffer;
+    }
+
     private static void WriteUInt16(Span<byte> destination, ushort value, ByteOrder byteOrder)
     {
         if (byteOrder == ByteOrder.LittleEndian)
@@ -717,6 +937,14 @@ public sealed class X11StateAndHandshakeTests
             return Task.CompletedTask;
         }
 
+        public Task PresentFrameAsync(
+            NativeWindowReference handle,
+            FramebufferSnapshot framebuffer,
+            CancellationToken cancellationToken = default)
+        {
+            return Task.CompletedTask;
+        }
+
         public Task DestroyWindowAsync(
             NativeWindowReference handle,
             CancellationToken cancellationToken = default)
@@ -736,6 +964,8 @@ public sealed class X11StateAndHandshakeTests
         public List<NativeWindowReference> ShownWindows { get; } = [];
 
         public List<NativeWindowReference> HiddenWindows { get; } = [];
+
+        public List<(NativeWindowReference Handle, FramebufferSnapshot Framebuffer)> PresentedFrames { get; } = [];
 
         public List<NativeWindowReference> DestroyedWindows { get; } = [];
 
@@ -777,6 +1007,15 @@ public sealed class X11StateAndHandshakeTests
             CancellationToken cancellationToken = default)
         {
             HiddenWindows.Add(handle);
+            return Task.CompletedTask;
+        }
+
+        public Task PresentFrameAsync(
+            NativeWindowReference handle,
+            FramebufferSnapshot framebuffer,
+            CancellationToken cancellationToken = default)
+        {
+            PresentedFrames.Add((handle, framebuffer));
             return Task.CompletedTask;
         }
 

@@ -65,4 +65,20 @@ public sealed class NativeWindowCoordinator
 
         await _nativeWindowHost.DestroyWindowAsync(nativeWindow, cancellationToken).ConfigureAwait(false);
     }
+
+    public async Task PresentWindowAsync(
+        uint windowId,
+        FramebufferSnapshot framebuffer,
+        CancellationToken cancellationToken = default)
+    {
+        if (!_nativeWindowsById.TryGetValue(windowId, out var nativeWindow))
+        {
+            return;
+        }
+
+        await _nativeWindowHost.PresentFrameAsync(
+            nativeWindow,
+            framebuffer,
+            cancellationToken).ConfigureAwait(false);
+    }
 }

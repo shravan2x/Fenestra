@@ -54,9 +54,20 @@ public sealed class X11Server
         await _listener.RunAsync(
             (connection, connectionCancellationToken) =>
             {
-                var session = new X11ClientSession(_displayState, _handshakeConfiguration);
+                var session = new X11ClientSession(
+                    _displayState,
+                    _handshakeConfiguration,
+                    PresentRootAsync);
                 return session.HandleAsync(connection, connectionCancellationToken);
             },
             cancellationToken).ConfigureAwait(false);
+    }
+
+    private Task PresentRootAsync(CancellationToken cancellationToken)
+    {
+        return _nativeWindowCoordinator.PresentWindowAsync(
+            _displayState.RootWindowId,
+            _displayState.RootFramebuffer.Snapshot(),
+            cancellationToken);
     }
 }

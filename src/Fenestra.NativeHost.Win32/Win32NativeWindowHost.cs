@@ -147,6 +147,25 @@ public sealed class Win32NativeWindowHost : INativeWindowHost
         return Task.CompletedTask;
     }
 
+    public Task PresentFrameAsync(
+        NativeWindowReference handle,
+        FramebufferSnapshot framebuffer,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(framebuffer);
+
+        if (!OperatingSystem.IsWindows() || handle.IsStub)
+        {
+            Console.WriteLine(
+                $"Stub frame present for [{handle.WindowId}] {framebuffer.Width}x{framebuffer.Height} stride={framebuffer.Stride} bytes={framebuffer.Pixels.Length}.");
+            return Task.CompletedTask;
+        }
+
+        Console.WriteLine(
+            $"Win32 frame present requested for [{handle.WindowId}] {framebuffer.Width}x{framebuffer.Height} stride={framebuffer.Stride}.");
+        return Task.CompletedTask;
+    }
+
     private void EnsureWindowClassRegistered()
     {
         if (!OperatingSystem.IsWindows())

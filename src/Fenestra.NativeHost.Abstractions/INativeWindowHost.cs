@@ -23,6 +23,11 @@ public interface INativeWindowHost
         NativeWindowReference handle,
         CancellationToken cancellationToken = default);
 
+    Task PresentFrameAsync(
+        NativeWindowReference handle,
+        FramebufferSnapshot framebuffer,
+        CancellationToken cancellationToken = default);
+
     Task DestroyWindowAsync(
         NativeWindowReference handle,
         CancellationToken cancellationToken = default);

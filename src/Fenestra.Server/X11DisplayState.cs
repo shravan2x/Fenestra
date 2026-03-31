@@ -8,6 +8,7 @@ public sealed class X11DisplayState
     private long _nextClientId;
     private readonly object _atomLock = new();
     private uint _nextDynamicAtomId;
+    private readonly X11RenderingState _renderingState;
 
     public X11DisplayState(
         uint resourceIdBase,
@@ -47,6 +48,12 @@ public sealed class X11DisplayState
         AllowedDepths = allowedDepths ?? throw new ArgumentNullException(nameof(allowedDepths));
         AtomTable = atomTable ?? throw new ArgumentNullException(nameof(atomTable));
         _nextDynamicAtomId = AtomTable.AtomsByName.Values.DefaultIfEmpty(0u).Max() + 1;
+        _renderingState = new X11RenderingState(
+            rootWindowId,
+            screenWidthInPixels,
+            screenHeightInPixels,
+            rootDepth,
+            bitsPerPixel: 32);
     }
 
     public uint ResourceIdBase { get; }
@@ -78,6 +85,8 @@ public sealed class X11DisplayState
     public IReadOnlyList<X11DepthDefinition> AllowedDepths { get; }
 
     public X11AtomTable AtomTable { get; }
+
+    public SoftwareFramebuffer RootFramebuffer => _renderingState.RootFramebuffer;
 
     public X11ClientState CreateClientState(ByteOrder byteOrder)
     {
@@ -166,6 +175,172 @@ public sealed class X11DisplayState
             AtomTable.Register(atomName, atomId);
             return atomId;
         }
+    }
+
+    public bool CreatePixmap(uint pixmapId, ushort width, ushort height, byte depth)
+    {
+        return _renderingState.CreatePixmap(pixmapId, width, height, depth);
+    }
+
+    public bool FreePixmap(uint pixmapId)
+    {
+        return _renderingState.FreePixmap(pixmapId);
+    }
+
+    public bool CreateGraphicsContext(uint graphicsContextId, uint drawableId)
+    {
+        if (!TryGetWindow(drawableId, out _) && !_renderingState.TryGetPixmap(drawableId, out _))
+        {
+            return false;
+        }
+
+        return _renderingState.CreateGraphicsContext(graphicsContextId, drawableId);
+    }
+
+    public bool FreeGraphicsContext(uint graphicsContextId)
+    {
+        return _renderingState.FreeGraphicsContext(graphicsContextId);
+    }
+
+    public bool TryGetGraphicsContext(uint graphicsContextId, out GraphicsContextDefinition? graphicsContext)
+    {
+        return _renderingState.TryGetGraphicsContext(graphicsContextId, out graphicsContext);
+    }
+
+    public bool TryGetDrawable(uint drawableId, out DrawableTarget target)
+    {
+        if (drawableId == RootWindowId)
+        {
+            target = new DrawableTarget(
+                drawableId,
+                RootFramebuffer.Width,
+                RootFramebuffer.Height,
+                RootFramebuffer.Depth,
+                RootFramebuffer.BitsPerPixel,
+                RootFramebuffer.StrideInBytes,
+                RootFramebuffer.Pixels);
+            return true;
+        }
+
+        if (_renderingState.TryGetPixmap(drawableId, out var pixmap) && pixmap is not null)
+        {
+            target = new DrawableTarget(
+                drawableId,
+                pixmap.Width,
+                pixmap.Height,
+                pixmap.Depth,
+                pixmap.BitsPerPixel,
+                pixmap.StrideInBytes,
+                pixmap.Pixels);
+            return true;
+        }
+
+        target = default;
+        return false;
+    }
+
+    public bool TryGetImage(
+        uint drawableId,
+        short x,
+        short y,
+        ushort width,
+        ushort height,
+        out GetImageResult result)
+    {
+        if (!TryGetDrawable(drawableId, out var target))
+        {
+            result = default;
+            return false;
+        }
+
+        if (x < 0 || y < 0)
+        {
+            result = default;
+            return false;
+        }
+
+        if (x + width > target.Width || y + height > target.Height)
+        {
+            result = default;
+            return false;
+        }
+
+        var bytesPerPixel = target.BitsPerPixel / 8;
+        var resultStride = width * bytesPerPixel;
+        var buffer = new byte[resultStride * height];
+
+        for (var row = 0; row < height; row++)
+        {
+            var sourceOffset = ((y + row) * target.StrideInBytes) + (x * bytesPerPixel);
+            var destinationOffset = row * resultStride;
+            target.Pixels.AsSpan(sourceOffset, resultStride).CopyTo(buffer.AsSpan(destinationOffset, resultStride));
+        }
+
+        result = new GetImageResult(target.Depth, RootVisualId, buffer);
+        return true;
+    }
+
+    public bool PutImage(
+        uint drawableId,
+        uint graphicsContextId,
+        ushort width,
+        ushort height,
+        short dstX,
+        short dstY,
+        byte leftPad,
+        byte depth,
+        ReadOnlySpan<byte> imageBytes)
+    {
+        if (leftPad != 0)
+        {
+            return false;
+        }
+
+        if (!TryGetGraphicsContext(graphicsContextId, out var graphicsContext) || graphicsContext is null)
+        {
+            return false;
+        }
+
+        if (graphicsContext.DrawableId != drawableId)
+        {
+            return false;
+        }
+
+        if (!TryGetDrawable(drawableId, out var target))
+        {
+            return false;
+        }
+
+        if (depth != target.Depth || target.BitsPerPixel != 32)
+        {
+            return false;
+        }
+
+        if (dstX < 0 || dstY < 0)
+        {
+            return false;
+        }
+
+        if (dstX + width > target.Width || dstY + height > target.Height)
+        {
+            return false;
+        }
+
+        var bytesPerPixel = target.BitsPerPixel / 8;
+        var expectedStride = width * bytesPerPixel;
+        if (imageBytes.Length != expectedStride * height)
+        {
+            return false;
+        }
+
+        for (var row = 0; row < height; row++)
+        {
+            var sourceOffset = row * expectedStride;
+            var destinationOffset = ((dstY + row) * target.StrideInBytes) + (dstX * bytesPerPixel);
+            imageBytes.Slice(sourceOffset, expectedStride).CopyTo(target.Pixels.AsSpan(destinationOffset, expectedStride));
+        }
+
+        return true;
     }
 
     public static X11DisplayState CreateDefault()

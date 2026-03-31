@@ -6,6 +6,27 @@ namespace Fenestra.Protocol.X11.Encoding;
 
 public static class X11CoreReplyEncoder
 {
+    public static byte[] EncodeGetImageReply(
+        ByteOrder byteOrder,
+        ushort sequenceNumber,
+        byte depth,
+        uint visualId,
+        ReadOnlySpan<byte> imageBytes)
+    {
+        var additionalLengthWords = imageBytes.Length / 4;
+        var buffer = new byte[32 + imageBytes.Length];
+        var span = buffer.AsSpan();
+
+        span[0] = 1;
+        span[1] = depth;
+        WriteUInt16(span[2..4], sequenceNumber, byteOrder);
+        WriteUInt32(span[4..8], (uint)additionalLengthWords, byteOrder);
+        WriteUInt32(span[8..12], visualId, byteOrder);
+        imageBytes.CopyTo(span[32..]);
+
+        return buffer;
+    }
+
     public static byte[] EncodeGetGeometryReply(
         ByteOrder byteOrder,
         ushort sequenceNumber,

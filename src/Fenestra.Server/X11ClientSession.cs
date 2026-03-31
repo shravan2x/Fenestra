@@ -11,14 +11,16 @@ internal sealed class X11ClientSession
     private readonly X11DisplayState _displayState;
     private readonly X11ServerHandshakeConfiguration _handshakeConfiguration;
     private readonly X11RequestDispatcher _requestDispatcher;
-
     public X11ClientSession(
         X11DisplayState displayState,
-        X11ServerHandshakeConfiguration handshakeConfiguration)
+        X11ServerHandshakeConfiguration handshakeConfiguration,
+        Func<CancellationToken, Task>? presentRootAsync = null)
     {
         _displayState = displayState ?? throw new ArgumentNullException(nameof(displayState));
         _handshakeConfiguration = handshakeConfiguration ?? throw new ArgumentNullException(nameof(handshakeConfiguration));
-        _requestDispatcher = new X11RequestDispatcher(_displayState);
+        _requestDispatcher = new X11RequestDispatcher(
+            _displayState,
+            presentRootAsync ?? (_ => Task.CompletedTask));
     }
 
     public async Task HandleAsync(X11TransportConnection connection, CancellationToken cancellationToken)
@@ -125,7 +127,12 @@ internal sealed class X11ClientSession
             }
 
             var sequenceNumber = clientState.AdvanceSequenceNumber();
-            var dispatchResult = _requestDispatcher.Dispatch(clientState, sequenceNumber, header, requestBytes);
+            var dispatchResult = await _requestDispatcher.DispatchAsync(
+                clientState,
+                sequenceNumber,
+                header,
+                requestBytes,
+                cancellationToken).ConfigureAwait(false);
 
             await stream.WriteAsync(dispatchResult, cancellationToken).ConfigureAwait(false);
             await stream.FlushAsync(cancellationToken).ConfigureAwait(false);

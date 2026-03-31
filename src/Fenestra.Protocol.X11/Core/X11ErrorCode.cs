@@ -11,5 +11,6 @@ public enum X11ErrorCode : byte
     Font = 7,
     Match = 8,
     Drawable = 9,
+    GContext = 13,
     Length = 16
 }
