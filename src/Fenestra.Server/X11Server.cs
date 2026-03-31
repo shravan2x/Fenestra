@@ -8,6 +8,7 @@ public sealed class X11Server
     private readonly IX11TransportListener _listener;
     private readonly INativeWindowHost _windowHost;
     private readonly X11ServerHandshakeConfiguration _handshakeConfiguration;
+    private readonly X11DisplayState _displayState;
 
     public X11Server(
         IX11TransportListener listener,
@@ -24,6 +25,7 @@ public sealed class X11Server
         _listener = listener;
         _windowHost = windowHost;
         _handshakeConfiguration = handshakeConfiguration;
+        _displayState = X11DisplayState.CreateDefault();
     }
 
     public async Task StartAsync(X11ServerOptions options, CancellationToken cancellationToken = default)
@@ -48,7 +50,7 @@ public sealed class X11Server
         await _listener.RunAsync(
             (connection, connectionCancellationToken) =>
             {
-                var session = new X11ClientSession(_handshakeConfiguration);
+                var session = new X11ClientSession(_displayState, _handshakeConfiguration);
                 return session.HandleAsync(connection, connectionCancellationToken);
             },
             cancellationToken).ConfigureAwait(false);

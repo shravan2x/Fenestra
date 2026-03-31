@@ -10,8 +10,13 @@ using Fenestra.Transport;
 
 namespace Fenestra.Tests;
 
-public sealed class X11HandshakeTests
+public sealed class X11StateAndHandshakeTests
 {
+    private static readonly X11ServerHandshakeConfiguration DefaultHandshakeConfiguration =
+        X11ServerHandshakeConfiguration.CreateDefault();
+    private static readonly X11DisplayState DefaultDisplayState =
+        X11DisplayState.CreateDefault();
+
     [Fact]
     public void ParseSetupRequest_ReadsLittleEndianAuthorizationFields()
     {
@@ -71,7 +76,11 @@ public sealed class X11HandshakeTests
     [Fact]
     public void EncodeSuccess_WritesExpectedLittleEndianHeader()
     {
-        var response = X11ServerHandshakeConfiguration.CreateDefault().CreateSuccessResponse(ByteOrder.LittleEndian);
+        var clientState = DefaultDisplayState.CreateClientState();
+        var response = DefaultHandshakeConfiguration.CreateSuccessResponse(
+            ByteOrder.LittleEndian,
+            DefaultDisplayState,
+            clientState);
 
         var bytes = X11SetupResponseEncoder.EncodeSuccess(response);
 
@@ -85,6 +94,93 @@ public sealed class X11HandshakeTests
         Assert.Equal((byte)1, bytes[29]);
         Assert.Equal((byte)'l', bytes[30]);
         Assert.Equal("Fenestra", Encoding.ASCII.GetString(bytes.AsSpan(40, 8)));
+    }
+
+    [Fact]
+    public void DisplayState_ExposesFixedRootResources()
+    {
+        var displayState = DefaultDisplayState;
+
+        Assert.Equal(0x0020_0000u, displayState.ResourceIdBase);
+        Assert.Equal(0x001F_FFFFu, displayState.ResourceIdMask);
+        Assert.Equal(1u, displayState.RootWindowId);
+        Assert.Equal(1u, displayState.DefaultColormapId);
+        Assert.Equal(33u, displayState.RootVisualId);
+        Assert.Equal((ushort)1024, displayState.ScreenWidthInPixels);
+        Assert.Equal((ushort)768, displayState.ScreenHeightInPixels);
+    }
+
+    [Fact]
+    public void ClientState_AllocatesSequentialXidsWithinMask()
+    {
+        var displayState = DefaultDisplayState;
+        var clientState = displayState.CreateClientState();
+
+        var first = clientState.AllocateXid();
+        var second = clientState.AllocateXid();
+        var third = clientState.AllocateXid();
+
+        Assert.Equal(displayState.ResourceIdBase | 1u, first);
+        Assert.Equal(displayState.ResourceIdBase | 2u, second);
+        Assert.Equal(displayState.ResourceIdBase | 3u, third);
+        Assert.All(new[] { first, second, third }, xid =>
+        {
+            Assert.Equal(displayState.ResourceIdBase, xid & ~displayState.ResourceIdMask);
+        });
+    }
+
+    [Fact]
+    public void HandshakeConfiguration_UsesDisplayStateValues()
+    {
+        var configuration = new X11ServerHandshakeConfiguration(
+            releaseNumber: 7,
+            motionBufferSize: 4,
+            vendor: "PhaseTwo",
+            maximumRequestLength: 4096);
+        var displayState = new X11DisplayState(
+            resourceIdBase: 0x0040_0000,
+            resourceIdMask: 0x000F_FFFF,
+            screenWidthInPixels: 1440,
+            screenHeightInPixels: 900,
+            screenWidthInMillimeters: 310,
+            screenHeightInMillimeters: 190,
+            rootWindowId: 99,
+            defaultColormapId: 77,
+            rootVisualId: 123,
+            whitePixel: 0x00FF_FFFF,
+            blackPixel: 0x0000_0000,
+            rootDepth: 24,
+            pixmapFormats:
+            [
+                new X11PixmapFormatDefinition(Depth: 24, BitsPerPixel: 32, ScanlinePad: 32)
+            ],
+            allowedDepths:
+            [
+                new X11DepthDefinition(
+                    Depth: 24,
+                    Visuals:
+                    [
+                        new X11VisualDefinition(
+                            VisualId: 123,
+                            VisualClass: 4,
+                            BitsPerRgbValue: 8,
+                            ColormapEntries: 256,
+                            RedMask: 0x00FF_0000,
+                            GreenMask: 0x0000_FF00,
+                            BlueMask: 0x0000_00FF)
+                    ])
+            ],
+            atomTable: X11AtomTable.CreateDefault());
+        var clientState = displayState.CreateClientState();
+        var response = configuration.CreateSuccessResponse(ByteOrder.BigEndian, displayState, clientState);
+
+        Assert.Equal("PhaseTwo", response.Vendor);
+        Assert.Equal(7u, response.ReleaseNumber);
+        Assert.Equal(0x0040_0000u, response.ResourceIdBase);
+        Assert.Equal(0x000F_FFFFu, response.ResourceIdMask);
+        Assert.Equal(99u, response.Screens[0].RootWindowId);
+        Assert.Equal(77u, response.Screens[0].DefaultColormapId);
+        Assert.Equal(123u, response.Screens[0].RootVisualId);
     }
 
     [Theory]
@@ -121,10 +217,8 @@ public sealed class X11HandshakeTests
         await stream.WriteAsync(requestBytes);
         await stream.FlushAsync();
 
-        var responseBuffer = new byte[80];
-        var bytesRead = await ReadExactLengthAsync(stream, responseBuffer, 80);
+        var responseBuffer = await ReadSetupResponseAsync(stream, byteOrder);
 
-        Assert.Equal(80, bytesRead);
         Assert.Equal(1, responseBuffer[0]);
         Assert.Equal((ushort)11, ReadUInt16(responseBuffer.AsSpan(2, 2), byteOrder));
         Assert.Equal((ushort)0, ReadUInt16(responseBuffer.AsSpan(4, 2), byteOrder));
@@ -135,6 +229,11 @@ public sealed class X11HandshakeTests
         Assert.Equal((byte)byteOrder, responseBuffer[30]);
         Assert.Equal((byte)byteOrder, responseBuffer[31]);
         Assert.Equal("Fenestra", Encoding.ASCII.GetString(responseBuffer.AsSpan(40, 8)));
+        var vendorLength = ReadUInt16(responseBuffer.AsSpan(24, 2), byteOrder);
+        var screenOffset = 40 + PadToFourBytes(vendorLength) + (responseBuffer[29] * 8);
+        Assert.Equal(1u, ReadUInt32(responseBuffer.AsSpan(screenOffset, 4), byteOrder));
+        Assert.Equal(1u, ReadUInt32(responseBuffer.AsSpan(screenOffset + 4, 4), byteOrder));
+        Assert.Equal(33u, ReadUInt32(responseBuffer.AsSpan(screenOffset + 32, 4), byteOrder));
 
         cancellationTokenSource.Cancel();
         await serverTask;
@@ -155,7 +254,26 @@ public sealed class X11HandshakeTests
         throw new TimeoutException("Timed out waiting for TCP listener to bind.");
     }
 
-    private static async Task<int> ReadExactLengthAsync(NetworkStream stream, byte[] buffer, int expectedLength)
+    private static async Task<byte[]> ReadSetupResponseAsync(NetworkStream stream, ByteOrder byteOrder)
+    {
+        var header = new byte[8];
+        await ReadExactLengthAsync(stream, header, header.Length);
+
+        var additionalLengthWords = ReadUInt16(header.AsSpan(6, 2), byteOrder);
+        var response = new byte[8 + (additionalLengthWords * 4)];
+        header.CopyTo(response, 0);
+
+        if (response.Length > header.Length)
+        {
+            await ReadExactLengthAsync(
+                stream,
+                response.AsMemory(header.Length, response.Length - header.Length));
+        }
+
+        return response;
+    }
+
+    private static async Task ReadExactLengthAsync(NetworkStream stream, byte[] buffer, int expectedLength)
     {
         var totalRead = 0;
 
@@ -169,8 +287,22 @@ public sealed class X11HandshakeTests
 
             totalRead += bytesRead;
         }
+    }
 
-        return totalRead;
+    private static async Task ReadExactLengthAsync(NetworkStream stream, Memory<byte> buffer)
+    {
+        var totalRead = 0;
+
+        while (totalRead < buffer.Length)
+        {
+            var bytesRead = await stream.ReadAsync(buffer[totalRead..]);
+            if (bytesRead == 0)
+            {
+                throw new EndOfStreamException("Connection closed before the X11 setup response completed.");
+            }
+
+            totalRead += bytesRead;
+        }
     }
 
     private static ushort ReadUInt16(ReadOnlySpan<byte> buffer, ByteOrder byteOrder)
@@ -178,6 +310,13 @@ public sealed class X11HandshakeTests
         return byteOrder == ByteOrder.LittleEndian
             ? BinaryPrimitives.ReadUInt16LittleEndian(buffer)
             : BinaryPrimitives.ReadUInt16BigEndian(buffer);
+    }
+
+    private static uint ReadUInt32(ReadOnlySpan<byte> buffer, ByteOrder byteOrder)
+    {
+        return byteOrder == ByteOrder.LittleEndian
+            ? BinaryPrimitives.ReadUInt32LittleEndian(buffer)
+            : BinaryPrimitives.ReadUInt32BigEndian(buffer);
     }
 
     private static byte[] BuildSetupRequest(

@@ -7,47 +7,27 @@ public sealed class X11ServerHandshakeConfiguration
     public static X11ServerHandshakeConfiguration CreateDefault()
     {
         return new X11ServerHandshakeConfiguration(
-            ReleaseNumber: 1,
-            ResourceIdBase: 0x0020_0000,
-            ResourceIdMask: 0x001F_FFFF,
-            MotionBufferSize: 0,
-            Vendor: "Fenestra",
-            MaximumRequestLength: ushort.MaxValue,
-            ScreenWidthInPixels: 1024,
-            ScreenHeightInPixels: 768,
-            ScreenWidthInMillimeters: 270,
-            ScreenHeightInMillimeters: 203);
+            releaseNumber: 1,
+            motionBufferSize: 0,
+            vendor: "Fenestra",
+            maximumRequestLength: ushort.MaxValue);
     }
 
     public X11ServerHandshakeConfiguration(
-        uint ReleaseNumber,
-        uint ResourceIdBase,
-        uint ResourceIdMask,
-        uint MotionBufferSize,
-        string Vendor,
-        ushort MaximumRequestLength,
-        ushort ScreenWidthInPixels,
-        ushort ScreenHeightInPixels,
-        ushort ScreenWidthInMillimeters,
-        ushort ScreenHeightInMillimeters)
+        uint releaseNumber,
+        uint motionBufferSize,
+        string vendor,
+        ushort maximumRequestLength)
     {
-        this.ReleaseNumber = ReleaseNumber;
-        this.ResourceIdBase = ResourceIdBase;
-        this.ResourceIdMask = ResourceIdMask;
-        this.MotionBufferSize = MotionBufferSize;
-        this.Vendor = Vendor;
-        this.MaximumRequestLength = MaximumRequestLength;
-        this.ScreenWidthInPixels = ScreenWidthInPixels;
-        this.ScreenHeightInPixels = ScreenHeightInPixels;
-        this.ScreenWidthInMillimeters = ScreenWidthInMillimeters;
-        this.ScreenHeightInMillimeters = ScreenHeightInMillimeters;
+        ReleaseNumber = releaseNumber;
+        MotionBufferSize = motionBufferSize;
+        Vendor = string.IsNullOrWhiteSpace(vendor)
+            ? throw new ArgumentException("Vendor name is required.", nameof(vendor))
+            : vendor;
+        MaximumRequestLength = maximumRequestLength;
     }
 
     public uint ReleaseNumber { get; }
-
-    public uint ResourceIdBase { get; }
-
-    public uint ResourceIdMask { get; }
 
     public uint MotionBufferSize { get; }
 
@@ -55,26 +35,24 @@ public sealed class X11ServerHandshakeConfiguration
 
     public ushort MaximumRequestLength { get; }
 
-    public ushort ScreenWidthInPixels { get; }
-
-    public ushort ScreenHeightInPixels { get; }
-
-    public ushort ScreenWidthInMillimeters { get; }
-
-    public ushort ScreenHeightInMillimeters { get; }
-
-    public X11SetupSuccessResponse CreateSuccessResponse(ByteOrder byteOrder)
+    public X11SetupSuccessResponse CreateSuccessResponse(
+        ByteOrder byteOrder,
+        X11DisplayState displayState,
+        X11ClientState clientState)
     {
+        ArgumentNullException.ThrowIfNull(displayState);
+        ArgumentNullException.ThrowIfNull(clientState);
+
         return new X11SetupSuccessResponse(
             ByteOrder: byteOrder,
             ProtocolMajorVersion: 11,
             ProtocolMinorVersion: 0,
-            ReleaseNumber,
-            ResourceIdBase,
-            ResourceIdMask,
-            MotionBufferSize,
-            Vendor,
-            MaximumRequestLength,
+            ReleaseNumber: ReleaseNumber,
+            ResourceIdBase: clientState.ResourceIdBase,
+            ResourceIdMask: clientState.ResourceIdMask,
+            MotionBufferSize: MotionBufferSize,
+            Vendor: Vendor,
+            MaximumRequestLength: MaximumRequestLength,
             ImageByteOrder: byteOrder == ByteOrder.LittleEndian ? (byte)'l' : (byte)'B',
             BitmapBitOrder: byteOrder == ByteOrder.LittleEndian ? (byte)'l' : (byte)'B',
             BitmapScanlineUnit: 32,
@@ -83,42 +61,40 @@ public sealed class X11ServerHandshakeConfiguration
             MaxKeycode: 255,
             PixmapFormats:
             [
-                new X11PixmapFormat(Depth: 24, BitsPerPixel: 32, ScanlinePad: 32)
+                new X11PixmapFormat(Depth: displayState.RootDepth, BitsPerPixel: 32, ScanlinePad: 32)
             ],
             Screens:
             [
                 new X11Screen(
-                    RootWindowId: 1,
-                    DefaultColormapId: 1,
-                    WhitePixel: 0x00FF_FFFF,
-                    BlackPixel: 0x0000_0000,
+                    RootWindowId: displayState.RootWindowId,
+                    DefaultColormapId: displayState.DefaultColormapId,
+                    WhitePixel: displayState.WhitePixel,
+                    BlackPixel: displayState.BlackPixel,
                     CurrentInputMasks: 0,
-                    WidthInPixels: ScreenWidthInPixels,
-                    HeightInPixels: ScreenHeightInPixels,
-                    WidthInMillimeters: ScreenWidthInMillimeters,
-                    HeightInMillimeters: ScreenHeightInMillimeters,
+                    WidthInPixels: displayState.ScreenWidthInPixels,
+                    HeightInPixels: displayState.ScreenHeightInPixels,
+                    WidthInMillimeters: displayState.ScreenWidthInMillimeters,
+                    HeightInMillimeters: displayState.ScreenHeightInMillimeters,
                     MinInstalledMaps: 1,
                     MaxInstalledMaps: 1,
-                    RootVisualId: 33,
+                    RootVisualId: displayState.RootVisualId,
                     BackingStores: 0,
                     SaveUnders: false,
-                    RootDepth: 24,
-                    AllowedDepths:
-                    [
-                        new X11Depth(
-                            Depth: 24,
-                            Visuals:
-                            [
-                                new X11Visual(
-                                    VisualId: 33,
-                                    VisualClass: 4,
-                                    BitsPerRgbValue: 8,
-                                    ColormapEntries: 256,
-                                    RedMask: 0x00FF_0000,
-                                    GreenMask: 0x0000_FF00,
-                                    BlueMask: 0x0000_00FF)
-                            ])
-                    ])
+                    RootDepth: displayState.RootDepth,
+                    AllowedDepths: displayState.AllowedDepths
+                        .Select(static depth => new X11Depth(
+                            Depth: depth.Depth,
+                            Visuals: depth.Visuals
+                                .Select(static visual => new X11Visual(
+                                    VisualId: visual.VisualId,
+                                    VisualClass: visual.VisualClass,
+                                    BitsPerRgbValue: visual.BitsPerRgbValue,
+                                    ColormapEntries: visual.ColormapEntries,
+                                    RedMask: visual.RedMask,
+                                    GreenMask: visual.GreenMask,
+                                    BlueMask: visual.BlueMask))
+                                .ToArray()))
+                        .ToArray())
             ]);
     }
 }

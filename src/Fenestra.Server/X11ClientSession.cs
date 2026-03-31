@@ -7,10 +7,14 @@ namespace Fenestra.Server;
 
 internal sealed class X11ClientSession
 {
+    private readonly X11DisplayState _displayState;
     private readonly X11ServerHandshakeConfiguration _handshakeConfiguration;
 
-    public X11ClientSession(X11ServerHandshakeConfiguration handshakeConfiguration)
+    public X11ClientSession(
+        X11DisplayState displayState,
+        X11ServerHandshakeConfiguration handshakeConfiguration)
     {
+        _displayState = displayState ?? throw new ArgumentNullException(nameof(displayState));
         _handshakeConfiguration = handshakeConfiguration ?? throw new ArgumentNullException(nameof(handshakeConfiguration));
     }
 
@@ -41,15 +45,16 @@ internal sealed class X11ClientSession
             throw new InvalidOperationException("Received malformed X11 setup request.");
         }
 
-        var responseBytes = CreateResponseBytes(request);
+        var clientState = _displayState.CreateClientState();
+        var responseBytes = CreateResponseBytes(request, clientState);
         await connection.Stream.WriteAsync(responseBytes, cancellationToken).ConfigureAwait(false);
         await connection.Stream.FlushAsync(cancellationToken).ConfigureAwait(false);
 
         Console.WriteLine(
-            $"Accepted X11 client {connection.RemoteEndpoint} using byte order {(char)request.ByteOrder} and protocol {request.ProtocolMajorVersion}.{request.ProtocolMinorVersion}.");
+            $"Accepted X11 client {clientState.ClientId} from {connection.RemoteEndpoint} using byte order {(char)request.ByteOrder} and protocol {request.ProtocolMajorVersion}.{request.ProtocolMinorVersion}.");
     }
 
-    private byte[] CreateResponseBytes(X11SetupRequest request)
+    private byte[] CreateResponseBytes(X11SetupRequest request, X11ClientState clientState)
     {
         if (request.ProtocolMajorVersion != 11 || request.ProtocolMinorVersion != 0)
         {
@@ -61,7 +66,8 @@ internal sealed class X11ClientSession
                     "Unsupported X11 protocol version."));
         }
 
-        return X11SetupResponseEncoder.EncodeSuccess(_handshakeConfiguration.CreateSuccessResponse(request.ByteOrder));
+        return X11SetupResponseEncoder.EncodeSuccess(
+            _handshakeConfiguration.CreateSuccessResponse(request.ByteOrder, _displayState, clientState));
     }
 
     private static async Task<byte[]> ReadExactAsync(
