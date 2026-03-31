@@ -1,3 +1,5 @@
+using Fenestra.Protocol.X11.Setup;
+
 namespace Fenestra.Server;
 
 public sealed class X11ClientState
@@ -6,7 +8,7 @@ public sealed class X11ClientState
     private readonly uint _resourceIdMask;
     private uint _nextResourceIdOffset;
 
-    public X11ClientState(uint clientId, uint resourceIdBase, uint resourceIdMask)
+    public X11ClientState(uint clientId, uint resourceIdBase, uint resourceIdMask, ByteOrder byteOrder)
     {
         if (resourceIdMask == 0)
         {
@@ -17,6 +19,7 @@ public sealed class X11ClientState
         ResourceIdBase = resourceIdBase;
         _resourceIdMask = resourceIdMask;
         _nextResourceIdOffset = 1;
+        ByteOrder = byteOrder;
     }
 
     public uint ClientId { get; }
@@ -24,6 +27,8 @@ public sealed class X11ClientState
     public uint ResourceIdBase { get; }
 
     public uint ResourceIdMask => _resourceIdMask;
+
+    public ByteOrder ByteOrder { get; }
 
     public ushort SequenceNumber { get; private set; }
 

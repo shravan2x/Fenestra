@@ -3,6 +3,7 @@ using System.Net.Sockets;
 using System.Text;
 using Fenestra.NativeHost.Abstractions;
 using Fenestra.Protocol.X11.Encoding;
+using Fenestra.Protocol.X11.Core;
 using Fenestra.Protocol.X11.Parsing;
 using Fenestra.Protocol.X11.Setup;
 using Fenestra.Server;
@@ -76,7 +77,7 @@ public sealed class X11StateAndHandshakeTests
     [Fact]
     public void EncodeSuccess_WritesExpectedLittleEndianHeader()
     {
-        var clientState = DefaultDisplayState.CreateClientState();
+        var clientState = DefaultDisplayState.CreateClientState(ByteOrder.LittleEndian);
         var response = DefaultHandshakeConfiguration.CreateSuccessResponse(
             ByteOrder.LittleEndian,
             DefaultDisplayState,
@@ -114,7 +115,7 @@ public sealed class X11StateAndHandshakeTests
     public void ClientState_AllocatesSequentialXidsWithinMask()
     {
         var displayState = DefaultDisplayState;
-        var clientState = displayState.CreateClientState();
+        var clientState = displayState.CreateClientState(ByteOrder.LittleEndian);
 
         var first = clientState.AllocateXid();
         var second = clientState.AllocateXid();
@@ -171,7 +172,7 @@ public sealed class X11StateAndHandshakeTests
                     ])
             ],
             atomTable: X11AtomTable.CreateDefault());
-        var clientState = displayState.CreateClientState();
+        var clientState = displayState.CreateClientState(ByteOrder.BigEndian);
         var response = configuration.CreateSuccessResponse(ByteOrder.BigEndian, displayState, clientState);
 
         Assert.Equal("PhaseTwo", response.Vendor);
@@ -239,6 +240,181 @@ public sealed class X11StateAndHandshakeTests
         await serverTask;
     }
 
+    [Theory]
+    [InlineData(ByteOrder.LittleEndian)]
+    [InlineData(ByteOrder.BigEndian)]
+    public async Task RequestLoop_GetGeometry_ReturnsRootWindowGeometry(ByteOrder byteOrder)
+    {
+        using var cancellationTokenSource = new CancellationTokenSource();
+        var options = new X11ServerOptions(
+            DisplayNumber: 10,
+            ListenAddress: "127.0.0.1",
+            Port: 0,
+            EnableNativeWindows: false);
+        var transport = new TcpDisplayEndpoint(options.ListenAddress, options.Port, options.DisplayNumber);
+        var server = new X11Server(
+            transport,
+            new FakeNativeWindowHost(),
+            X11ServerHandshakeConfiguration.CreateDefault());
+        var serverTask = server.StartAsync(options, cancellationTokenSource.Token);
+
+        await WaitForBoundPortAsync(transport);
+
+        using var client = new TcpClient();
+        await client.ConnectAsync("127.0.0.1", transport.BoundPort);
+
+        await using var stream = client.GetStream();
+        await CompleteHandshakeAsync(stream, byteOrder);
+
+        var request = BuildSingleUInt32Request(byteOrder, majorOpcode: 14, data: 0, value: 1);
+        await stream.WriteAsync(request);
+        await stream.FlushAsync();
+
+        var reply = await ReadReplyOrErrorAsync(stream, byteOrder);
+
+        Assert.Equal(1, reply[0]);
+        Assert.Equal(24, reply[1]);
+        Assert.Equal((ushort)1, ReadUInt16(reply.AsSpan(2, 2), byteOrder));
+        Assert.Equal(1u, ReadUInt32(reply.AsSpan(8, 4), byteOrder));
+        Assert.Equal((ushort)1024, ReadUInt16(reply.AsSpan(16, 2), byteOrder));
+        Assert.Equal((ushort)768, ReadUInt16(reply.AsSpan(18, 2), byteOrder));
+
+        cancellationTokenSource.Cancel();
+        await serverTask;
+    }
+
+    [Theory]
+    [InlineData(ByteOrder.LittleEndian)]
+    [InlineData(ByteOrder.BigEndian)]
+    public async Task RequestLoop_QueryTree_ReturnsRootWithoutChildren(ByteOrder byteOrder)
+    {
+        using var cancellationTokenSource = new CancellationTokenSource();
+        var options = new X11ServerOptions(
+            DisplayNumber: 11,
+            ListenAddress: "127.0.0.1",
+            Port: 0,
+            EnableNativeWindows: false);
+        var transport = new TcpDisplayEndpoint(options.ListenAddress, options.Port, options.DisplayNumber);
+        var server = new X11Server(
+            transport,
+            new FakeNativeWindowHost(),
+            X11ServerHandshakeConfiguration.CreateDefault());
+        var serverTask = server.StartAsync(options, cancellationTokenSource.Token);
+
+        await WaitForBoundPortAsync(transport);
+
+        using var client = new TcpClient();
+        await client.ConnectAsync("127.0.0.1", transport.BoundPort);
+
+        await using var stream = client.GetStream();
+        await CompleteHandshakeAsync(stream, byteOrder);
+
+        var request = BuildSingleUInt32Request(byteOrder, majorOpcode: 15, data: 0, value: 1);
+        await stream.WriteAsync(request);
+        await stream.FlushAsync();
+
+        var reply = await ReadReplyOrErrorAsync(stream, byteOrder);
+
+        Assert.Equal(1, reply[0]);
+        Assert.Equal((ushort)1, ReadUInt16(reply.AsSpan(2, 2), byteOrder));
+        Assert.Equal(1u, ReadUInt32(reply.AsSpan(8, 4), byteOrder));
+        Assert.Equal(0u, ReadUInt32(reply.AsSpan(12, 4), byteOrder));
+        Assert.Equal((ushort)0, ReadUInt16(reply.AsSpan(16, 2), byteOrder));
+
+        cancellationTokenSource.Cancel();
+        await serverTask;
+    }
+
+    [Theory]
+    [InlineData(ByteOrder.LittleEndian)]
+    [InlineData(ByteOrder.BigEndian)]
+    public async Task RequestLoop_InternAtom_CreatesAndFindsDynamicAtom(ByteOrder byteOrder)
+    {
+        using var cancellationTokenSource = new CancellationTokenSource();
+        var options = new X11ServerOptions(
+            DisplayNumber: 12,
+            ListenAddress: "127.0.0.1",
+            Port: 0,
+            EnableNativeWindows: false);
+        var transport = new TcpDisplayEndpoint(options.ListenAddress, options.Port, options.DisplayNumber);
+        var server = new X11Server(
+            transport,
+            new FakeNativeWindowHost(),
+            X11ServerHandshakeConfiguration.CreateDefault());
+        var serverTask = server.StartAsync(options, cancellationTokenSource.Token);
+
+        await WaitForBoundPortAsync(transport);
+
+        using var client = new TcpClient();
+        await client.ConnectAsync("127.0.0.1", transport.BoundPort);
+
+        await using var stream = client.GetStream();
+        await CompleteHandshakeAsync(stream, byteOrder);
+
+        var createRequest = BuildInternAtomRequest(byteOrder, onlyIfExists: false, atomName: "FENESTRA_TEST_ATOM");
+        await stream.WriteAsync(createRequest);
+        await stream.FlushAsync();
+        var createReply = await ReadReplyOrErrorAsync(stream, byteOrder);
+        var atomId = ReadUInt32(createReply.AsSpan(8, 4), byteOrder);
+
+        Assert.Equal(1, createReply[0]);
+        Assert.True(atomId > 33);
+
+        var lookupRequest = BuildInternAtomRequest(byteOrder, onlyIfExists: true, atomName: "FENESTRA_TEST_ATOM");
+        await stream.WriteAsync(lookupRequest);
+        await stream.FlushAsync();
+        var lookupReply = await ReadReplyOrErrorAsync(stream, byteOrder);
+
+        Assert.Equal(1, lookupReply[0]);
+        Assert.Equal((ushort)2, ReadUInt16(lookupReply.AsSpan(2, 2), byteOrder));
+        Assert.Equal(atomId, ReadUInt32(lookupReply.AsSpan(8, 4), byteOrder));
+
+        cancellationTokenSource.Cancel();
+        await serverTask;
+    }
+
+    [Theory]
+    [InlineData(ByteOrder.LittleEndian)]
+    [InlineData(ByteOrder.BigEndian)]
+    public async Task RequestLoop_UnsupportedOpcode_ReturnsRequestError(ByteOrder byteOrder)
+    {
+        using var cancellationTokenSource = new CancellationTokenSource();
+        var options = new X11ServerOptions(
+            DisplayNumber: 13,
+            ListenAddress: "127.0.0.1",
+            Port: 0,
+            EnableNativeWindows: false);
+        var transport = new TcpDisplayEndpoint(options.ListenAddress, options.Port, options.DisplayNumber);
+        var server = new X11Server(
+            transport,
+            new FakeNativeWindowHost(),
+            X11ServerHandshakeConfiguration.CreateDefault());
+        var serverTask = server.StartAsync(options, cancellationTokenSource.Token);
+
+        await WaitForBoundPortAsync(transport);
+
+        using var client = new TcpClient();
+        await client.ConnectAsync("127.0.0.1", transport.BoundPort);
+
+        await using var stream = client.GetStream();
+        await CompleteHandshakeAsync(stream, byteOrder);
+
+        var request = BuildSingleUInt32Request(byteOrder, majorOpcode: 250, data: 0, value: 0);
+        await stream.WriteAsync(request);
+        await stream.FlushAsync();
+
+        var error = await ReadReplyOrErrorAsync(stream, byteOrder);
+
+        Assert.Equal(0, error[0]);
+        Assert.Equal((byte)X11ErrorCode.Request, error[1]);
+        Assert.Equal((ushort)1, ReadUInt16(error.AsSpan(2, 2), byteOrder));
+        Assert.Equal(0u, ReadUInt32(error.AsSpan(4, 4), byteOrder));
+        Assert.Equal((byte)250, error[10]);
+
+        cancellationTokenSource.Cancel();
+        await serverTask;
+    }
+
     private static async Task WaitForBoundPortAsync(TcpDisplayEndpoint transport)
     {
         for (var attempt = 0; attempt < 50; attempt++)
@@ -271,6 +447,41 @@ public sealed class X11StateAndHandshakeTests
         }
 
         return response;
+    }
+
+    private static async Task CompleteHandshakeAsync(NetworkStream stream, ByteOrder byteOrder)
+    {
+        var requestBytes = BuildSetupRequest(
+            byteOrder,
+            protocolMajorVersion: 11,
+            protocolMinorVersion: 0,
+            authorizationName: string.Empty,
+            authorizationData: []);
+
+        await stream.WriteAsync(requestBytes);
+        await stream.FlushAsync();
+        _ = await ReadSetupResponseAsync(stream, byteOrder);
+    }
+
+    private static async Task<byte[]> ReadReplyOrErrorAsync(NetworkStream stream, ByteOrder byteOrder)
+    {
+        var prefix = new byte[8];
+        await ReadExactLengthAsync(stream, prefix, prefix.Length);
+
+        if (prefix[0] == 0)
+        {
+            var error = new byte[32];
+            prefix.CopyTo(error, 0);
+            await ReadExactLengthAsync(stream, error.AsMemory(8, 24));
+            return error;
+        }
+
+        var additionalLengthWords = ReadUInt32(prefix.AsSpan(4, 4), byteOrder);
+        var reply = new byte[32 + (additionalLengthWords * 4)];
+        prefix.CopyTo(reply, 0);
+        await ReadExactLengthAsync(stream, reply.AsMemory(8, reply.Length - 8));
+
+        return reply;
     }
 
     private static async Task ReadExactLengthAsync(NetworkStream stream, byte[] buffer, int expectedLength)
@@ -343,6 +554,33 @@ public sealed class X11StateAndHandshakeTests
         return buffer;
     }
 
+    private static byte[] BuildSingleUInt32Request(
+        ByteOrder byteOrder,
+        byte majorOpcode,
+        byte data,
+        uint value)
+    {
+        var buffer = new byte[8];
+        buffer[0] = majorOpcode;
+        buffer[1] = data;
+        WriteUInt16(buffer.AsSpan(2, 2), 2, byteOrder);
+        WriteUInt32(buffer.AsSpan(4, 4), value, byteOrder);
+        return buffer;
+    }
+
+    private static byte[] BuildInternAtomRequest(ByteOrder byteOrder, bool onlyIfExists, string atomName)
+    {
+        var atomNameBytes = Encoding.ASCII.GetBytes(atomName);
+        var paddedNameLength = PadToFourBytes(atomNameBytes.Length);
+        var buffer = new byte[8 + paddedNameLength];
+        buffer[0] = 16;
+        buffer[1] = onlyIfExists ? (byte)1 : (byte)0;
+        WriteUInt16(buffer.AsSpan(2, 2), (ushort)(buffer.Length / 4), byteOrder);
+        WriteUInt16(buffer.AsSpan(4, 2), (ushort)atomNameBytes.Length, byteOrder);
+        atomNameBytes.CopyTo(buffer.AsSpan(8));
+        return buffer;
+    }
+
     private static void WriteUInt16(Span<byte> destination, ushort value, ByteOrder byteOrder)
     {
         if (byteOrder == ByteOrder.LittleEndian)
@@ -352,6 +590,18 @@ public sealed class X11StateAndHandshakeTests
         else
         {
             BinaryPrimitives.WriteUInt16BigEndian(destination, value);
+        }
+    }
+
+    private static void WriteUInt32(Span<byte> destination, uint value, ByteOrder byteOrder)
+    {
+        if (byteOrder == ByteOrder.LittleEndian)
+        {
+            BinaryPrimitives.WriteUInt32LittleEndian(destination, value);
+        }
+        else
+        {
+            BinaryPrimitives.WriteUInt32BigEndian(destination, value);
         }
     }
 

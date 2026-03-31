@@ -1,8 +1,13 @@
+using Fenestra.Protocol.X11.Core;
+using Fenestra.Protocol.X11.Setup;
+
 namespace Fenestra.Server;
 
 public sealed class X11DisplayState
 {
     private long _nextClientId;
+    private readonly object _atomLock = new();
+    private uint _nextDynamicAtomId;
 
     public X11DisplayState(
         uint resourceIdBase,
@@ -41,6 +46,7 @@ public sealed class X11DisplayState
         PixmapFormats = pixmapFormats ?? throw new ArgumentNullException(nameof(pixmapFormats));
         AllowedDepths = allowedDepths ?? throw new ArgumentNullException(nameof(allowedDepths));
         AtomTable = atomTable ?? throw new ArgumentNullException(nameof(atomTable));
+        _nextDynamicAtomId = AtomTable.AtomsByName.Values.DefaultIfEmpty(0u).Max() + 1;
     }
 
     public uint ResourceIdBase { get; }
@@ -73,10 +79,93 @@ public sealed class X11DisplayState
 
     public X11AtomTable AtomTable { get; }
 
-    public X11ClientState CreateClientState()
+    public X11ClientState CreateClientState(ByteOrder byteOrder)
     {
         var clientId = unchecked((uint)Interlocked.Increment(ref _nextClientId));
-        return new X11ClientState(clientId, ResourceIdBase, ResourceIdMask);
+        return new X11ClientState(clientId, ResourceIdBase, ResourceIdMask, byteOrder);
+    }
+
+    public bool TryGetWindow(uint windowId, out X11WindowDefinition? window)
+    {
+        if (windowId == RootWindowId)
+        {
+            window = new X11WindowDefinition(
+                Id: RootWindowId,
+                ParentId: null,
+                X: 0,
+                Y: 0,
+                Width: ScreenWidthInPixels,
+                Height: ScreenHeightInPixels,
+                BorderWidth: 0,
+                Depth: RootDepth);
+            return true;
+        }
+
+        window = null;
+        return false;
+    }
+
+    public bool TryGetGeometry(uint drawableId, out X11DrawableGeometry geometry, out X11ErrorCode? errorCode)
+    {
+        if (drawableId == RootWindowId)
+        {
+            geometry = new X11DrawableGeometry(
+                RootWindowId,
+                X: 0,
+                Y: 0,
+                Width: ScreenWidthInPixels,
+                Height: ScreenHeightInPixels,
+                BorderWidth: 0,
+                Depth: RootDepth);
+            errorCode = null;
+            return true;
+        }
+
+        geometry = default;
+        errorCode = X11ErrorCode.Drawable;
+        return false;
+    }
+
+    public bool TryQueryTree(uint windowId, out X11QueryTreeResult result, out X11ErrorCode? errorCode)
+    {
+        if (windowId == RootWindowId)
+        {
+            result = new X11QueryTreeResult(RootWindowId, ParentWindowId: 0, ChildWindowIds: []);
+            errorCode = null;
+            return true;
+        }
+
+        result = default;
+        errorCode = X11ErrorCode.Window;
+        return false;
+    }
+
+    public uint? LookupAtom(string atomName)
+    {
+        ArgumentNullException.ThrowIfNull(atomName);
+        return AtomTable.TryGet(atomName);
+    }
+
+    public uint InternAtom(string atomName, bool onlyIfExists)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(atomName);
+
+        lock (_atomLock)
+        {
+            if (AtomTable.TryGet(atomName) is { } existingAtom)
+            {
+                return existingAtom;
+            }
+
+            if (onlyIfExists)
+            {
+                return 0;
+            }
+
+            var atomId = _nextDynamicAtomId++;
+            AtomTable.Register(atomName, atomId);
+            return atomId;
+        }
     }
 
     public static X11DisplayState CreateDefault()
@@ -151,6 +240,12 @@ public sealed class X11AtomTable
         return _atomsByName.TryGetValue(name, out var atom) ? atom : null;
     }
 
+    public void Register(string name, uint atomId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(name);
+        _atomsByName[name] = atomId;
+    }
+
     public static X11AtomTable CreateDefault()
     {
         return new X11AtomTable(new Dictionary<string, uint>(StringComparer.Ordinal)
@@ -168,3 +263,27 @@ public sealed class X11AtomTable
         });
     }
 }
+
+public readonly record struct X11DrawableGeometry(
+    uint RootWindowId,
+    short X,
+    short Y,
+    ushort Width,
+    ushort Height,
+    ushort BorderWidth,
+    byte Depth);
+
+public readonly record struct X11QueryTreeResult(
+    uint RootWindowId,
+    uint ParentWindowId,
+    IReadOnlyList<uint> ChildWindowIds);
+
+public sealed record X11WindowDefinition(
+    uint Id,
+    uint? ParentId,
+    short X,
+    short Y,
+    ushort Width,
+    ushort Height,
+    ushort BorderWidth,
+    byte Depth);
