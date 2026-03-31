@@ -184,6 +184,75 @@ public sealed class X11StateAndHandshakeTests
         Assert.Equal(123u, response.Screens[0].RootVisualId);
     }
 
+    [Fact]
+    public async Task NativeWindowCoordinator_CreatesUpdatesAndDestroysWindow()
+    {
+        var host = new RecordingNativeWindowHost();
+        var coordinator = new NativeWindowCoordinator(host);
+
+        await coordinator.InitializeAsync();
+        var created = await coordinator.CreateOrUpdateTopLevelWindowAsync(
+            10,
+            new WindowDescriptor(
+                WindowId: 10,
+                Title: "Initial",
+                X: 10,
+                Y: 20,
+                Width: 640,
+                Height: 480,
+                IsVisible: false));
+
+        await coordinator.ShowOrCreateAsync(
+            10,
+            new WindowDescriptor(
+                WindowId: 10,
+                Title: "Updated",
+                X: 30,
+                Y: 40,
+                Width: 800,
+                Height: 600,
+                IsVisible: true));
+
+        await coordinator.DestroyTopLevelWindowAsync(10);
+
+        Assert.Equal(1, host.InitializeCalls);
+        Assert.Single(host.CreatedWindows);
+        Assert.Single(host.UpdatedWindows);
+        Assert.Single(host.ShownWindows);
+        Assert.Single(host.DestroyedWindows);
+        Assert.Equal("Initial", host.CreatedWindows[0].Title);
+        Assert.Equal("Updated", host.UpdatedWindows[0].Title);
+        Assert.Equal((uint)10, created.WindowId);
+        Assert.Empty(coordinator.NativeWindowsById);
+    }
+
+    [Fact]
+    public async Task ServerStart_CreatesBootstrapNativeWindowThroughCoordinator()
+    {
+        using var cancellationTokenSource = new CancellationTokenSource();
+        var host = new RecordingNativeWindowHost();
+        var transport = new BlockingTransportListener();
+        var server = new X11Server(transport, host, X11ServerHandshakeConfiguration.CreateDefault());
+        var options = new X11ServerOptions(
+            DisplayNumber: 0,
+            ListenAddress: "127.0.0.1",
+            Port: 6000,
+            EnableNativeWindows: true);
+
+        var serverTask = server.StartAsync(options, cancellationTokenSource.Token);
+        await transport.WaitForRunAsync();
+        cancellationTokenSource.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () => await serverTask);
+
+        Assert.Equal(1, host.InitializeCalls);
+        Assert.Single(host.CreatedWindows);
+        Assert.Single(host.ShownWindows);
+        Assert.Equal((uint)1, host.CreatedWindows[0].WindowId);
+        Assert.Equal("Fenestra bootstrap host", host.CreatedWindows[0].Title);
+        Assert.Equal(1024, host.CreatedWindows[0].Width);
+        Assert.Equal(768, host.CreatedWindows[0].Height);
+    }
+
     [Theory]
     [InlineData(ByteOrder.LittleEndian)]
     [InlineData(ByteOrder.BigEndian)]
@@ -619,9 +688,124 @@ public sealed class X11StateAndHandshakeTests
             return Task.CompletedTask;
         }
 
-        public Task ShowWindowAsync(WindowDescriptor descriptor, CancellationToken cancellationToken = default)
+        public Task<NativeWindowReference> CreateWindowAsync(
+            WindowDescriptor descriptor,
+            CancellationToken cancellationToken = default)
+        {
+            return Task.FromResult(new NativeWindowReference(descriptor.WindowId, 0, PlatformName, true));
+        }
+
+        public Task UpdateWindowAsync(
+            NativeWindowReference handle,
+            WindowDescriptor descriptor,
+            CancellationToken cancellationToken = default)
         {
             return Task.CompletedTask;
+        }
+
+        public Task ShowWindowAsync(
+            NativeWindowReference handle,
+            CancellationToken cancellationToken = default)
+        {
+            return Task.CompletedTask;
+        }
+
+        public Task HideWindowAsync(
+            NativeWindowReference handle,
+            CancellationToken cancellationToken = default)
+        {
+            return Task.CompletedTask;
+        }
+
+        public Task DestroyWindowAsync(
+            NativeWindowReference handle,
+            CancellationToken cancellationToken = default)
+        {
+            return Task.CompletedTask;
+        }
+    }
+
+    private sealed class RecordingNativeWindowHost : INativeWindowHost
+    {
+        public int InitializeCalls { get; private set; }
+
+        public List<WindowDescriptor> CreatedWindows { get; } = [];
+
+        public List<WindowDescriptor> UpdatedWindows { get; } = [];
+
+        public List<NativeWindowReference> ShownWindows { get; } = [];
+
+        public List<NativeWindowReference> HiddenWindows { get; } = [];
+
+        public List<NativeWindowReference> DestroyedWindows { get; } = [];
+
+        public string PlatformName => "Recording";
+
+        public Task InitializeAsync(CancellationToken cancellationToken = default)
+        {
+            InitializeCalls++;
+            return Task.CompletedTask;
+        }
+
+        public Task<NativeWindowReference> CreateWindowAsync(
+            WindowDescriptor descriptor,
+            CancellationToken cancellationToken = default)
+        {
+            CreatedWindows.Add(descriptor);
+            return Task.FromResult(new NativeWindowReference(descriptor.WindowId, descriptor.WindowId, PlatformName, true));
+        }
+
+        public Task UpdateWindowAsync(
+            NativeWindowReference handle,
+            WindowDescriptor descriptor,
+            CancellationToken cancellationToken = default)
+        {
+            UpdatedWindows.Add(descriptor);
+            return Task.CompletedTask;
+        }
+
+        public Task ShowWindowAsync(
+            NativeWindowReference handle,
+            CancellationToken cancellationToken = default)
+        {
+            ShownWindows.Add(handle);
+            return Task.CompletedTask;
+        }
+
+        public Task HideWindowAsync(
+            NativeWindowReference handle,
+            CancellationToken cancellationToken = default)
+        {
+            HiddenWindows.Add(handle);
+            return Task.CompletedTask;
+        }
+
+        public Task DestroyWindowAsync(
+            NativeWindowReference handle,
+            CancellationToken cancellationToken = default)
+        {
+            DestroyedWindows.Add(handle);
+            return Task.CompletedTask;
+        }
+    }
+
+    private sealed class BlockingTransportListener : IX11TransportListener
+    {
+        private readonly TaskCompletionSource _runStarted = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public string DisplayName => ":test";
+
+        public async Task RunAsync(
+            Func<X11TransportConnection, CancellationToken, Task> connectionHandler,
+            CancellationToken cancellationToken = default)
+        {
+            _runStarted.TrySetResult();
+            await Task.Delay(Timeout.Infinite, cancellationToken);
+        }
+
+        public Task WaitForRunAsync()
+        {
+            return _runStarted.Task;
         }
     }
 }

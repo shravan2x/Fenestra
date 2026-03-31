@@ -6,9 +6,9 @@ namespace Fenestra.Server;
 public sealed class X11Server
 {
     private readonly IX11TransportListener _listener;
-    private readonly INativeWindowHost _windowHost;
     private readonly X11ServerHandshakeConfiguration _handshakeConfiguration;
     private readonly X11DisplayState _displayState;
+    private readonly NativeWindowCoordinator _nativeWindowCoordinator;
 
     public X11Server(
         IX11TransportListener listener,
@@ -23,9 +23,10 @@ public sealed class X11Server
         X11ServerHandshakeConfiguration handshakeConfiguration)
     {
         _listener = listener;
-        _windowHost = windowHost;
         _handshakeConfiguration = handshakeConfiguration;
         _displayState = X11DisplayState.CreateDefault();
+        _nativeWindowCoordinator = new NativeWindowCoordinator(
+            windowHost ?? throw new ArgumentNullException(nameof(windowHost)));
     }
 
     public async Task StartAsync(X11ServerOptions options, CancellationToken cancellationToken = default)
@@ -34,14 +35,17 @@ public sealed class X11Server
 
         if (options.EnableNativeWindows)
         {
-            await _windowHost.InitializeAsync(cancellationToken).ConfigureAwait(false);
-            await _windowHost.ShowWindowAsync(
+            await _nativeWindowCoordinator.InitializeAsync(cancellationToken).ConfigureAwait(false);
+            await _nativeWindowCoordinator.ShowOrCreateAsync(
+                windowId: _displayState.RootWindowId,
                 new WindowDescriptor(
+                    WindowId: _displayState.RootWindowId,
                     Title: "Fenestra bootstrap host",
                     X: 100,
                     Y: 100,
-                    Width: 1024,
-                    Height: 768),
+                    Width: _displayState.ScreenWidthInPixels,
+                    Height: _displayState.ScreenHeightInPixels,
+                    IsVisible: true),
                 cancellationToken).ConfigureAwait(false);
         }
 
