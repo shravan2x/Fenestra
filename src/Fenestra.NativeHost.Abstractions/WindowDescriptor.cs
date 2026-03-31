@@ -14,3 +14,22 @@ public sealed record NativeWindowReference(
     long HostHandle,
     string PlatformName,
     bool IsStub);
+
+public enum NativeInputEventKind
+{
+    KeyDown,
+    KeyUp,
+    ButtonDown,
+    ButtonUp,
+    PointerMove,
+    FocusIn,
+    FocusOut
+}
+
+public sealed record NativeInputEvent(
+    uint WindowId,
+    NativeInputEventKind Kind,
+    uint Detail,
+    short X,
+    short Y,
+    ushort State);

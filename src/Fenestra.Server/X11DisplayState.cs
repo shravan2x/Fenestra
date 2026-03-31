@@ -1,3 +1,4 @@
+using Fenestra.NativeHost.Abstractions;
 using Fenestra.Protocol.X11.Core;
 using Fenestra.Protocol.X11.Setup;
 
@@ -9,6 +10,7 @@ public sealed class X11DisplayState
     private readonly object _atomLock = new();
     private uint _nextDynamicAtomId;
     private readonly X11RenderingState _renderingState;
+    private readonly X11EventState _eventState;
 
     public X11DisplayState(
         uint resourceIdBase,
@@ -54,6 +56,7 @@ public sealed class X11DisplayState
             screenHeightInPixels,
             rootDepth,
             bitsPerPixel: 32);
+        _eventState = new X11EventState(rootWindowId);
     }
 
     public uint ResourceIdBase { get; }
@@ -87,6 +90,8 @@ public sealed class X11DisplayState
     public X11AtomTable AtomTable { get; }
 
     public SoftwareFramebuffer RootFramebuffer => _renderingState.RootFramebuffer;
+
+    public uint FocusWindowId => _eventState.FocusWindowId;
 
     public X11ClientState CreateClientState(ByteOrder byteOrder)
     {
@@ -341,6 +346,38 @@ public sealed class X11DisplayState
         }
 
         return true;
+    }
+
+    public bool SelectInput(uint clientId, uint windowId, uint eventMask)
+    {
+        if (!TryGetWindow(windowId, out _))
+        {
+            return false;
+        }
+
+        _eventState.SetSelection(clientId, windowId, eventMask);
+        return true;
+    }
+
+    public void SetInputFocus(uint windowId)
+    {
+        _eventState.SetInputFocus(windowId);
+    }
+
+    public void EnqueueInputEvent(NativeInputEvent inputEvent)
+    {
+        _eventState.EnqueueInputEvent(inputEvent);
+    }
+
+    public IReadOnlyList<QueuedX11Event> DrainEventsForClient(X11ClientState clientState)
+    {
+        ArgumentNullException.ThrowIfNull(clientState);
+        return _eventState.DrainEventsForClient(clientState.ClientId);
+    }
+
+    public void TranslatePendingInputEvents(ushort sequenceNumber)
+    {
+        _eventState.TranslatePendingInputEvents(sequenceNumber);
     }
 
     public static X11DisplayState CreateDefault()

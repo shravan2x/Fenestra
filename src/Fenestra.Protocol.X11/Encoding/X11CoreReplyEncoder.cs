@@ -6,6 +6,24 @@ namespace Fenestra.Protocol.X11.Encoding;
 
 public static class X11CoreReplyEncoder
 {
+    public static byte[] EncodeGetInputFocusReply(
+        ByteOrder byteOrder,
+        ushort sequenceNumber,
+        byte revertTo,
+        uint focusWindowId)
+    {
+        var buffer = new byte[32];
+        var span = buffer.AsSpan();
+
+        span[0] = 1;
+        span[1] = revertTo;
+        WriteUInt16(span[2..4], sequenceNumber, byteOrder);
+        WriteUInt32(span[4..8], 0, byteOrder);
+        WriteUInt32(span[8..12], focusWindowId, byteOrder);
+
+        return buffer;
+    }
+
     public static byte[] EncodeGetImageReply(
         ByteOrder byteOrder,
         ushort sequenceNumber,

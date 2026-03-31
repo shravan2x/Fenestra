@@ -6,6 +6,10 @@ public interface INativeWindowHost
 
     Task InitializeAsync(CancellationToken cancellationToken = default);
 
+    Task RegisterInputSinkAsync(
+        Func<NativeInputEvent, CancellationToken, Task> inputCallback,
+        CancellationToken cancellationToken = default);
+
     Task<NativeWindowReference> CreateWindowAsync(
         WindowDescriptor descriptor,
         CancellationToken cancellationToken = default);

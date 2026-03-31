@@ -6,6 +6,7 @@ public sealed class NativeWindowCoordinator
 {
     private readonly INativeWindowHost _nativeWindowHost;
     private readonly Dictionary<uint, NativeWindowReference> _nativeWindowsById = new();
+    private Func<NativeInputEvent, CancellationToken, Task>? _inputSink;
 
     public NativeWindowCoordinator(INativeWindowHost nativeWindowHost)
     {
@@ -17,6 +18,16 @@ public sealed class NativeWindowCoordinator
     public Task InitializeAsync(CancellationToken cancellationToken = default)
     {
         return _nativeWindowHost.InitializeAsync(cancellationToken);
+    }
+
+    public Task RegisterInputSinkAsync(
+        Func<NativeInputEvent, CancellationToken, Task> inputSink,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(inputSink);
+
+        _inputSink = inputSink;
+        return _nativeWindowHost.RegisterInputSinkAsync(DispatchInputAsync, cancellationToken);
     }
 
     public async Task<NativeWindowReference> CreateOrUpdateTopLevelWindowAsync(
@@ -80,5 +91,15 @@ public sealed class NativeWindowCoordinator
             nativeWindow,
             framebuffer,
             cancellationToken).ConfigureAwait(false);
+    }
+
+    private Task DispatchInputAsync(NativeInputEvent inputEvent, CancellationToken cancellationToken)
+    {
+        if (_inputSink is null)
+        {
+            return Task.CompletedTask;
+        }
+
+        return _inputSink(inputEvent, cancellationToken);
     }
 }

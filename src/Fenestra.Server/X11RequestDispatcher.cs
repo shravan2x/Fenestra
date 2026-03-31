@@ -28,9 +28,12 @@ internal sealed class X11RequestDispatcher
 
         return header.MajorOpcode switch
         {
+            42 => HandleSetInputFocus(clientState, _displayState, header, requestBytes.Span, sequenceNumber),
+            43 => HandleGetInputFocus(clientState, _displayState, header, requestBytes.Span, sequenceNumber),
             14 => HandleGetGeometry(clientState, _displayState, header, requestBytes.Span, sequenceNumber),
             15 => HandleQueryTree(clientState, _displayState, header, requestBytes.Span, sequenceNumber),
             16 => HandleInternAtom(clientState, _displayState, header, requestBytes.Span, sequenceNumber),
+            46 => HandleSelectInput(clientState, _displayState, header, requestBytes.Span, sequenceNumber),
             53 => HandleCreatePixmap(clientState, _displayState, header, requestBytes.Span, sequenceNumber),
             54 => HandleFreePixmap(clientState, _displayState, header, requestBytes.Span, sequenceNumber),
             55 => HandleCreateGraphicsContext(clientState, _displayState, header, requestBytes.Span, sequenceNumber),
@@ -44,6 +47,94 @@ internal sealed class X11RequestDispatcher
                 badValue: 0,
                 header.MajorOpcode)
         };
+    }
+
+    private static byte[] HandleSetInputFocus(
+        X11ClientState clientState,
+        X11DisplayState displayState,
+        X11RequestHeader header,
+        ReadOnlySpan<byte> requestBytes,
+        ushort sequenceNumber)
+    {
+        if (requestBytes.Length != 12)
+        {
+            return X11ErrorEncoder.Encode(
+                clientState.ByteOrder,
+                X11ErrorCode.Length,
+                sequenceNumber,
+                (uint)requestBytes.Length,
+                header.MajorOpcode);
+        }
+
+        var focusWindowId = X11RequestParser.ReadUInt32(requestBytes[4..8], clientState.ByteOrder);
+        if (!displayState.TryGetWindow(focusWindowId, out _))
+        {
+            return X11ErrorEncoder.Encode(
+                clientState.ByteOrder,
+                X11ErrorCode.Window,
+                sequenceNumber,
+                focusWindowId,
+                header.MajorOpcode);
+        }
+
+        displayState.SetInputFocus(focusWindowId);
+        return Array.Empty<byte>();
+    }
+
+    private static byte[] HandleGetInputFocus(
+        X11ClientState clientState,
+        X11DisplayState displayState,
+        X11RequestHeader header,
+        ReadOnlySpan<byte> requestBytes,
+        ushort sequenceNumber)
+    {
+        if (requestBytes.Length != 4)
+        {
+            return X11ErrorEncoder.Encode(
+                clientState.ByteOrder,
+                X11ErrorCode.Length,
+                sequenceNumber,
+                (uint)requestBytes.Length,
+                header.MajorOpcode);
+        }
+
+        return X11CoreReplyEncoder.EncodeGetInputFocusReply(
+            clientState.ByteOrder,
+            sequenceNumber,
+            0,
+            displayState.FocusWindowId);
+    }
+
+    private static byte[] HandleSelectInput(
+        X11ClientState clientState,
+        X11DisplayState displayState,
+        X11RequestHeader header,
+        ReadOnlySpan<byte> requestBytes,
+        ushort sequenceNumber)
+    {
+        if (requestBytes.Length != 12)
+        {
+            return X11ErrorEncoder.Encode(
+                clientState.ByteOrder,
+                X11ErrorCode.Length,
+                sequenceNumber,
+                (uint)requestBytes.Length,
+                header.MajorOpcode);
+        }
+
+        var windowId = X11RequestParser.ReadUInt32(requestBytes[4..8], clientState.ByteOrder);
+        var eventMask = X11RequestParser.ReadUInt32(requestBytes[8..12], clientState.ByteOrder);
+        if (!displayState.SelectInput(clientState.ClientId, windowId, eventMask))
+        {
+            return X11ErrorEncoder.Encode(
+                clientState.ByteOrder,
+                X11ErrorCode.Window,
+                sequenceNumber,
+                windowId,
+                header.MajorOpcode);
+        }
+
+        return Array.Empty<byte>();
     }
 
     private static byte[] HandleGetGeometry(

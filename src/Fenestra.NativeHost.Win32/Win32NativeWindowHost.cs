@@ -10,6 +10,7 @@ public sealed class Win32NativeWindowHost : INativeWindowHost
     private readonly object _windowClassLock = new();
     private ushort _windowClassAtom;
     private string? _windowClassName;
+    private Func<NativeInputEvent, CancellationToken, Task>? _inputCallback;
 
     public string PlatformName => "Win32";
 
@@ -23,6 +24,14 @@ public sealed class Win32NativeWindowHost : INativeWindowHost
 
         EnsureWindowClassRegistered();
         Console.WriteLine("Win32 native window host initialized.");
+        return Task.CompletedTask;
+    }
+
+    public Task RegisterInputSinkAsync(
+        Func<NativeInputEvent, CancellationToken, Task> inputCallback,
+        CancellationToken cancellationToken = default)
+    {
+        _inputCallback = inputCallback ?? throw new ArgumentNullException(nameof(inputCallback));
         return Task.CompletedTask;
     }
 

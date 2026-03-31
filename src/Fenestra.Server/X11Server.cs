@@ -36,6 +36,9 @@ public sealed class X11Server
         if (options.EnableNativeWindows)
         {
             await _nativeWindowCoordinator.InitializeAsync(cancellationToken).ConfigureAwait(false);
+            await _nativeWindowCoordinator.RegisterInputSinkAsync(
+                HandleNativeInputAsync,
+                cancellationToken).ConfigureAwait(false);
             await _nativeWindowCoordinator.ShowOrCreateAsync(
                 windowId: _displayState.RootWindowId,
                 new WindowDescriptor(
@@ -69,5 +72,11 @@ public sealed class X11Server
             _displayState.RootWindowId,
             _displayState.RootFramebuffer.Snapshot(),
             cancellationToken);
+    }
+
+    private Task HandleNativeInputAsync(NativeInputEvent inputEvent, CancellationToken cancellationToken)
+    {
+        _displayState.EnqueueInputEvent(inputEvent);
+        return Task.CompletedTask;
     }
 }

@@ -1,3 +1,4 @@
+using Fenestra.NativeHost.Abstractions;
 using Fenestra.Protocol.X11.Core;
 using Fenestra.Protocol.X11.Encoding;
 using Fenestra.Protocol.X11.Parsing;
@@ -11,6 +12,7 @@ internal sealed class X11ClientSession
     private readonly X11DisplayState _displayState;
     private readonly X11ServerHandshakeConfiguration _handshakeConfiguration;
     private readonly X11RequestDispatcher _requestDispatcher;
+    private X11ClientState? _clientState;
     public X11ClientSession(
         X11DisplayState displayState,
         X11ServerHandshakeConfiguration handshakeConfiguration,
@@ -51,6 +53,7 @@ internal sealed class X11ClientSession
         }
 
         var clientState = _displayState.CreateClientState(request.ByteOrder);
+        _clientState = clientState;
         var responseBytes = CreateResponseBytes(request, clientState);
         await connection.Stream.WriteAsync(responseBytes, cancellationToken).ConfigureAwait(false);
         await connection.Stream.FlushAsync(cancellationToken).ConfigureAwait(false);
@@ -134,9 +137,32 @@ internal sealed class X11ClientSession
                 requestBytes,
                 cancellationToken).ConfigureAwait(false);
 
-            await stream.WriteAsync(dispatchResult, cancellationToken).ConfigureAwait(false);
+            if (dispatchResult.Length > 0)
+            {
+                await stream.WriteAsync(dispatchResult, cancellationToken).ConfigureAwait(false);
+            }
+
+            _displayState.TranslatePendingInputEvents(sequenceNumber);
+            var queuedEvents = _displayState.DrainEventsForClient(clientState);
+            foreach (var queuedEvent in queuedEvents)
+            {
+                var eventBytes = X11CoreEventEncoder.Encode(clientState.ByteOrder, queuedEvent);
+                await stream.WriteAsync(eventBytes, cancellationToken).ConfigureAwait(false);
+            }
+
             await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
         }
+    }
+
+    public Task OnNativeInputAsync(NativeInputEvent inputEvent, CancellationToken cancellationToken)
+    {
+        if (_clientState is null)
+        {
+            return Task.CompletedTask;
+        }
+
+        _displayState.EnqueueInputEvent(inputEvent);
+        return Task.CompletedTask;
     }
 
     private static async Task<byte[]> ReadExactAsync(

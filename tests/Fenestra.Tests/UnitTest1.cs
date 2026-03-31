@@ -623,6 +623,166 @@ public sealed class X11StateAndHandshakeTests
         await serverTask;
     }
 
+    [Theory]
+    [InlineData(ByteOrder.LittleEndian)]
+    [InlineData(ByteOrder.BigEndian)]
+    public async Task RequestLoop_GetInputFocus_ReturnsRootFocus(ByteOrder byteOrder)
+    {
+        using var cancellationTokenSource = new CancellationTokenSource();
+        var options = new X11ServerOptions(
+            DisplayNumber: 16,
+            ListenAddress: "127.0.0.1",
+            Port: 0,
+            EnableNativeWindows: false);
+        var transport = new TcpDisplayEndpoint(options.ListenAddress, options.Port, options.DisplayNumber);
+        var server = new X11Server(
+            transport,
+            new FakeNativeWindowHost(),
+            X11ServerHandshakeConfiguration.CreateDefault());
+        var serverTask = server.StartAsync(options, cancellationTokenSource.Token);
+
+        await WaitForBoundPortAsync(transport);
+
+        using var client = new TcpClient();
+        await client.ConnectAsync("127.0.0.1", transport.BoundPort);
+
+        await using var stream = client.GetStream();
+        await CompleteHandshakeAsync(stream, byteOrder);
+
+        await stream.WriteAsync(BuildGetInputFocusRequest(byteOrder));
+        await stream.FlushAsync();
+
+        var reply = await ReadReplyOrErrorAsync(stream, byteOrder);
+
+        Assert.Equal(1, reply[0]);
+        Assert.Equal((byte)0, reply[1]);
+        Assert.Equal((ushort)1, ReadUInt16(reply.AsSpan(2, 2), byteOrder));
+        Assert.Equal(1u, ReadUInt32(reply.AsSpan(8, 4), byteOrder));
+
+        cancellationTokenSource.Cancel();
+        await serverTask;
+    }
+
+    [Theory]
+    [InlineData(ByteOrder.LittleEndian)]
+    [InlineData(ByteOrder.BigEndian)]
+    public async Task RequestLoop_SelectInputAndNativeKeyEvent_DeliversKeyPress(ByteOrder byteOrder)
+    {
+        using var cancellationTokenSource = new CancellationTokenSource();
+        var host = new RecordingNativeWindowHost();
+        var options = new X11ServerOptions(
+            DisplayNumber: 17,
+            ListenAddress: "127.0.0.1",
+            Port: 0,
+            EnableNativeWindows: true);
+        var transport = new TcpDisplayEndpoint(options.ListenAddress, options.Port, options.DisplayNumber);
+        var server = new X11Server(
+            transport,
+            host,
+            X11ServerHandshakeConfiguration.CreateDefault());
+        var serverTask = server.StartAsync(options, cancellationTokenSource.Token);
+
+        await WaitForBoundPortAsync(transport);
+
+        using var client = new TcpClient();
+        await client.ConnectAsync("127.0.0.1", transport.BoundPort);
+
+        await using var stream = client.GetStream();
+        await CompleteHandshakeAsync(stream, byteOrder);
+
+        await stream.WriteAsync(BuildSelectInputRequest(byteOrder, 1, (uint)X11EventMask.KeyPress));
+        await stream.FlushAsync();
+
+        await stream.WriteAsync(BuildGetInputFocusRequest(byteOrder));
+        await stream.FlushAsync();
+        var initialReply = await ReadReplyOrErrorAsync(stream, byteOrder);
+        Assert.Equal(1, initialReply[0]);
+        Assert.Equal((ushort)2, ReadUInt16(initialReply.AsSpan(2, 2), byteOrder));
+
+        await host.EmitInputAsync(new NativeInputEvent(
+            WindowId: 1,
+            Kind: NativeInputEventKind.KeyDown,
+            Detail: 38,
+            X: 11,
+            Y: 12,
+            State: 0));
+
+        await stream.WriteAsync(BuildGetInputFocusRequest(byteOrder));
+        await stream.FlushAsync();
+
+        var reply = await ReadReplyOrErrorAsync(stream, byteOrder);
+        Assert.Equal(1, reply[0]);
+        Assert.Equal((ushort)3, ReadUInt16(reply.AsSpan(2, 2), byteOrder));
+        var keyEvent = await ReadCoreEventAsync(stream);
+
+        Assert.Equal((byte)X11EventKind.KeyPress, keyEvent[0]);
+        Assert.Equal((byte)38, keyEvent[1]);
+        Assert.Equal((ushort)3, ReadUInt16(keyEvent.AsSpan(2, 2), byteOrder));
+        Assert.Equal(1u, ReadUInt32(keyEvent.AsSpan(12, 4), byteOrder));
+        Assert.Equal((short)11, ReadInt16(keyEvent.AsSpan(20, 2), byteOrder));
+        Assert.Equal((short)12, ReadInt16(keyEvent.AsSpan(22, 2), byteOrder));
+
+        cancellationTokenSource.Cancel();
+        await WaitForServerStopAsync(serverTask);
+    }
+
+    [Theory]
+    [InlineData(ByteOrder.LittleEndian)]
+    [InlineData(ByteOrder.BigEndian)]
+    public async Task RequestLoop_SelectInputWithoutMask_DropsNativeEvent(ByteOrder byteOrder)
+    {
+        using var cancellationTokenSource = new CancellationTokenSource();
+        var host = new RecordingNativeWindowHost();
+        var options = new X11ServerOptions(
+            DisplayNumber: 18,
+            ListenAddress: "127.0.0.1",
+            Port: 0,
+            EnableNativeWindows: true);
+        var transport = new TcpDisplayEndpoint(options.ListenAddress, options.Port, options.DisplayNumber);
+        var server = new X11Server(
+            transport,
+            host,
+            X11ServerHandshakeConfiguration.CreateDefault());
+        var serverTask = server.StartAsync(options, cancellationTokenSource.Token);
+
+        await WaitForBoundPortAsync(transport);
+
+        using var client = new TcpClient();
+        await client.ConnectAsync("127.0.0.1", transport.BoundPort);
+
+        await using var stream = client.GetStream();
+        await CompleteHandshakeAsync(stream, byteOrder);
+
+        await stream.WriteAsync(BuildSelectInputRequest(byteOrder, 1, (uint)X11EventMask.Exposure));
+        await stream.FlushAsync();
+
+        await stream.WriteAsync(BuildGetInputFocusRequest(byteOrder));
+        await stream.FlushAsync();
+        var initialReply = await ReadReplyOrErrorAsync(stream, byteOrder);
+        Assert.Equal(1, initialReply[0]);
+
+        await host.EmitInputAsync(new NativeInputEvent(
+            WindowId: 1,
+            Kind: NativeInputEventKind.KeyDown,
+            Detail: 40,
+            X: 5,
+            Y: 6,
+            State: 0));
+
+        await stream.WriteAsync(BuildGetInputFocusRequest(byteOrder));
+        await stream.FlushAsync();
+
+        var reply = await ReadReplyOrErrorAsync(stream, byteOrder);
+        Assert.Equal(1, reply[0]);
+
+        var readTask = ReadCoreEventAsync(stream);
+        var completed = await Task.WhenAny(readTask, Task.Delay(150));
+        Assert.NotSame(readTask, completed);
+
+        cancellationTokenSource.Cancel();
+        await WaitForServerStopAsync(serverTask);
+    }
+
     private static async Task WaitForBoundPortAsync(TcpDisplayEndpoint transport)
     {
         for (var attempt = 0; attempt < 50; attempt++)
@@ -692,6 +852,13 @@ public sealed class X11StateAndHandshakeTests
         return reply;
     }
 
+    private static async Task<byte[]> ReadCoreEventAsync(NetworkStream stream)
+    {
+        var buffer = new byte[32];
+        await ReadExactLengthAsync(stream, buffer, buffer.Length);
+        return buffer;
+    }
+
     private static async Task ReadExactLengthAsync(NetworkStream stream, byte[] buffer, int expectedLength)
     {
         var totalRead = 0;
@@ -736,6 +903,13 @@ public sealed class X11StateAndHandshakeTests
         return byteOrder == ByteOrder.LittleEndian
             ? BinaryPrimitives.ReadUInt32LittleEndian(buffer)
             : BinaryPrimitives.ReadUInt32BigEndian(buffer);
+    }
+
+    private static short ReadInt16(ReadOnlySpan<byte> buffer, ByteOrder byteOrder)
+    {
+        return byteOrder == ByteOrder.LittleEndian
+            ? BinaryPrimitives.ReadInt16LittleEndian(buffer)
+            : BinaryPrimitives.ReadInt16BigEndian(buffer);
     }
 
     private static byte[] BuildSetupRequest(
@@ -870,6 +1044,26 @@ public sealed class X11StateAndHandshakeTests
         return buffer;
     }
 
+    private static byte[] BuildGetInputFocusRequest(ByteOrder byteOrder)
+    {
+        var buffer = new byte[4];
+        buffer[0] = 43;
+        buffer[1] = 0;
+        WriteUInt16(buffer.AsSpan(2, 2), 1, byteOrder);
+        return buffer;
+    }
+
+    private static byte[] BuildSelectInputRequest(ByteOrder byteOrder, uint windowId, uint eventMask)
+    {
+        var buffer = new byte[12];
+        buffer[0] = 46;
+        buffer[1] = 0;
+        WriteUInt16(buffer.AsSpan(2, 2), 3, byteOrder);
+        WriteUInt32(buffer.AsSpan(4, 4), windowId, byteOrder);
+        WriteUInt32(buffer.AsSpan(8, 4), eventMask, byteOrder);
+        return buffer;
+    }
+
     private static void WriteUInt16(Span<byte> destination, ushort value, ByteOrder byteOrder)
     {
         if (byteOrder == ByteOrder.LittleEndian)
@@ -899,12 +1093,33 @@ public sealed class X11StateAndHandshakeTests
         return (length + 3) & ~3;
     }
 
+    private static async Task WaitForServerStopAsync(Task serverTask)
+    {
+        try
+        {
+            await serverTask;
+        }
+        catch (OperationCanceledException)
+        {
+        }
+    }
+
     private sealed class FakeNativeWindowHost : INativeWindowHost
     {
+        private Func<NativeInputEvent, CancellationToken, Task>? _inputSink;
+
         public string PlatformName => "Fake";
 
         public Task InitializeAsync(CancellationToken cancellationToken = default)
         {
+            return Task.CompletedTask;
+        }
+
+        public Task RegisterInputSinkAsync(
+            Func<NativeInputEvent, CancellationToken, Task> inputCallback,
+            CancellationToken cancellationToken = default)
+        {
+            _inputSink = inputCallback;
             return Task.CompletedTask;
         }
 
@@ -955,6 +1170,8 @@ public sealed class X11StateAndHandshakeTests
 
     private sealed class RecordingNativeWindowHost : INativeWindowHost
     {
+        private Func<NativeInputEvent, CancellationToken, Task>? _inputSink;
+
         public int InitializeCalls { get; private set; }
 
         public List<WindowDescriptor> CreatedWindows { get; } = [];
@@ -974,6 +1191,14 @@ public sealed class X11StateAndHandshakeTests
         public Task InitializeAsync(CancellationToken cancellationToken = default)
         {
             InitializeCalls++;
+            return Task.CompletedTask;
+        }
+
+        public Task RegisterInputSinkAsync(
+            Func<NativeInputEvent, CancellationToken, Task> inputCallback,
+            CancellationToken cancellationToken = default)
+        {
+            _inputSink = inputCallback;
             return Task.CompletedTask;
         }
 
@@ -1025,6 +1250,13 @@ public sealed class X11StateAndHandshakeTests
         {
             DestroyedWindows.Add(handle);
             return Task.CompletedTask;
+        }
+
+        public Task EmitInputAsync(NativeInputEvent inputEvent, CancellationToken cancellationToken = default)
+        {
+            return _inputSink is null
+                ? Task.CompletedTask
+                : _inputSink(inputEvent, cancellationToken);
         }
     }
 
