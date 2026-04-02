@@ -131,6 +131,80 @@ public sealed class X11StateAndHandshakeTests
     }
 
     [Fact]
+    public void DisplayState_ClientResources_RegisterAndValidateOwnership()
+    {
+        var displayState = X11DisplayState.CreateDefault();
+        var clientState = displayState.CreateClientState(ByteOrder.LittleEndian);
+        var ownedPixmapId = clientState.AllocateXid();
+        var ownedGcId = clientState.AllocateXid();
+        var otherClient = displayState.CreateClientState(ByteOrder.BigEndian);
+
+        Assert.True(displayState.CreatePixmap(ownedPixmapId, width: 4, height: 4, depth: 24));
+        Assert.True(displayState.CreateGraphicsContext(ownedGcId, ownedPixmapId));
+
+        Assert.True(displayState.IsClientResource(ownedPixmapId));
+        Assert.True(displayState.DoesClientOwnResource(clientState.ClientId, ownedPixmapId));
+        Assert.True(displayState.DoesClientOwnResource(clientState.ClientId, ownedGcId));
+        Assert.False(displayState.DoesClientOwnResource(otherClient.ClientId, ownedPixmapId));
+    }
+
+    [Fact]
+    public void DisplayState_CanStoreNonRootWindowAndProperties()
+    {
+        var displayState = X11DisplayState.CreateDefault();
+        var clientState = displayState.CreateClientState(ByteOrder.LittleEndian);
+        var windowId = clientState.AllocateXid();
+        var wmNameAtom = displayState.GetOrCreateAtom("WM_NAME");
+
+        Assert.True(displayState.TryAddWindow(
+            clientState.ClientId,
+            new X11WindowDefinition(
+                Id: windowId,
+                ParentId: displayState.RootWindowId,
+                X: 10,
+                Y: 20,
+                Width: 320,
+                Height: 240,
+                BorderWidth: 1,
+                Depth: 24)));
+
+        Assert.True(displayState.TryGetWindow(windowId, out var window));
+        Assert.NotNull(window);
+        Assert.Equal(displayState.RootWindowId, window!.ParentId);
+        Assert.Equal((ushort)320, window.Width);
+        Assert.Equal((ushort)240, window.Height);
+        Assert.True(displayState.DoesClientOwnResource(clientState.ClientId, windowId));
+
+        var propertyBytes = Encoding.ASCII.GetBytes("Fenestra");
+        Assert.True(displayState.SetProperty(windowId, wmNameAtom, format: 8, propertyBytes));
+        Assert.True(displayState.TryGetProperty(windowId, wmNameAtom, out var propertyValue));
+        Assert.Equal((byte)8, propertyValue.Format);
+        Assert.Equal(propertyBytes, propertyValue.Value);
+        Assert.True(displayState.DeleteProperty(windowId, wmNameAtom));
+        Assert.False(displayState.TryGetProperty(windowId, wmNameAtom, out _));
+    }
+
+    [Fact]
+    public void DisplayState_CreatesColormapAndCursorResources()
+    {
+        var displayState = DefaultDisplayState;
+        var clientState = displayState.CreateClientState(ByteOrder.LittleEndian);
+
+        var colormapId = displayState.CreateColormap(clientState.ClientId);
+        var cursorId = displayState.CreateCursor(clientState.ClientId);
+
+        Assert.True(displayState.TryGetColormap(colormapId, out var colormap));
+        Assert.NotNull(colormap);
+        Assert.Equal(displayState.RootVisualId, colormap!.VisualId);
+        Assert.True(displayState.DoesClientOwnResource(clientState.ClientId, colormapId));
+
+        Assert.True(displayState.TryGetCursor(cursorId, out var cursor));
+        Assert.NotNull(cursor);
+        Assert.Equal(cursorId, cursor!.CursorId);
+        Assert.True(displayState.DoesClientOwnResource(clientState.ClientId, cursorId));
+    }
+
+    [Fact]
     public void HandshakeConfiguration_UsesDisplayStateValues()
     {
         var configuration = new X11ServerHandshakeConfiguration(

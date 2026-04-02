@@ -9,8 +9,17 @@ public sealed class X11DisplayState
     private long _nextClientId;
     private readonly object _atomLock = new();
     private uint _nextDynamicAtomId;
+    private readonly Dictionary<uint, X11ClientState> _clientsById = new();
+    private readonly Dictionary<uint, uint> _ownerClientIdByAllocatedResourceId = new();
+    private readonly Dictionary<uint, X11WindowDefinition> _windowsById = new();
+    private readonly Dictionary<(uint WindowId, uint AtomId), X11PropertyValue> _propertyStore = new();
+    private readonly Dictionary<uint, X11ColormapDefinition> _colormapsById = new();
+    private readonly Dictionary<uint, X11CursorDefinition> _cursorsById = new();
+    private readonly X11ResourceRegistry _resourceRegistry;
     private readonly X11RenderingState _renderingState;
     private readonly X11EventState _eventState;
+    private readonly X11ColormapDefinition _defaultColormap;
+    private readonly X11CursorDefinition _defaultCursor;
 
     public X11DisplayState(
         uint resourceIdBase,
@@ -50,6 +59,7 @@ public sealed class X11DisplayState
         AllowedDepths = allowedDepths ?? throw new ArgumentNullException(nameof(allowedDepths));
         AtomTable = atomTable ?? throw new ArgumentNullException(nameof(atomTable));
         _nextDynamicAtomId = AtomTable.AtomsByName.Values.DefaultIfEmpty(0u).Max() + 1;
+        _resourceRegistry = new X11ResourceRegistry();
         _renderingState = new X11RenderingState(
             rootWindowId,
             screenWidthInPixels,
@@ -57,6 +67,10 @@ public sealed class X11DisplayState
             rootDepth,
             bitsPerPixel: 32);
         _eventState = new X11EventState(rootWindowId);
+        _defaultColormap = new X11ColormapDefinition(defaultColormapId, rootVisualId);
+        _defaultCursor = new X11CursorDefinition(0);
+
+        RegisterCoreResources();
     }
 
     public uint ResourceIdBase { get; }
@@ -93,30 +107,36 @@ public sealed class X11DisplayState
 
     public uint FocusWindowId => _eventState.FocusWindowId;
 
+    public X11ResourceRegistry ResourceRegistry => _resourceRegistry;
+
+    public X11ColormapDefinition DefaultColormap => _defaultColormap;
+
+    public X11CursorDefinition DefaultCursor => _defaultCursor;
+
     public X11ClientState CreateClientState(ByteOrder byteOrder)
     {
         var clientId = unchecked((uint)Interlocked.Increment(ref _nextClientId));
-        return new X11ClientState(clientId, ResourceIdBase, ResourceIdMask, byteOrder);
+        var clientState = new X11ClientState(clientId, ResourceIdBase, ResourceIdMask, byteOrder);
+        _clientsById[clientId] = clientState;
+        return clientState;
     }
 
     public bool TryGetWindow(uint windowId, out X11WindowDefinition? window)
     {
-        if (windowId == RootWindowId)
+        return _windowsById.TryGetValue(windowId, out window);
+    }
+
+    public bool TryAddWindow(uint clientId, X11WindowDefinition window)
+    {
+        ArgumentNullException.ThrowIfNull(window);
+
+        if (!_resourceRegistry.TryRegister(window.Id, X11ResourceType.Window, clientId))
         {
-            window = new X11WindowDefinition(
-                Id: RootWindowId,
-                ParentId: null,
-                X: 0,
-                Y: 0,
-                Width: ScreenWidthInPixels,
-                Height: ScreenHeightInPixels,
-                BorderWidth: 0,
-                Depth: RootDepth);
-            return true;
+            return false;
         }
 
-        window = null;
-        return false;
+        _windowsById[window.Id] = window;
+        return true;
     }
 
     public bool TryGetGeometry(uint drawableId, out X11DrawableGeometry geometry, out X11ErrorCode? errorCode)
@@ -160,6 +180,17 @@ public sealed class X11DisplayState
         return AtomTable.TryGet(atomName);
     }
 
+    public bool IsClientResource(uint resourceId)
+    {
+        return _resourceRegistry.TryGet(resourceId, out _);
+    }
+
+    public bool DoesClientOwnResource(uint clientId, uint resourceId)
+    {
+        return _resourceRegistry.TryGet(resourceId, out var resource)
+            && resource.OwnerClientId == clientId;
+    }
+
     public uint InternAtom(string atomName, bool onlyIfExists)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(atomName);
@@ -182,14 +213,97 @@ public sealed class X11DisplayState
         }
     }
 
+    public uint GetOrCreateAtom(string atomName)
+    {
+        return InternAtom(atomName, onlyIfExists: false);
+    }
+
+    public bool SetProperty(uint windowId, uint atomId, byte format, byte[] value)
+    {
+        ArgumentNullException.ThrowIfNull(value);
+
+        if (!TryGetWindow(windowId, out _))
+        {
+            return false;
+        }
+
+        _propertyStore[(windowId, atomId)] = new X11PropertyValue(atomId, format, value.ToArray());
+        return true;
+    }
+
+    public bool TryGetProperty(uint windowId, uint atomId, out X11PropertyValue propertyValue)
+    {
+        return _propertyStore.TryGetValue((windowId, atomId), out propertyValue);
+    }
+
+    public bool DeleteProperty(uint windowId, uint atomId)
+    {
+        return _propertyStore.Remove((windowId, atomId));
+    }
+
+    public uint CreateColormap(uint clientId)
+    {
+        var colormapId = AllocateClientResourceId(clientId);
+        var colormap = new X11ColormapDefinition(colormapId, RootVisualId);
+        _colormapsById[colormapId] = colormap;
+        _resourceRegistry.TryRegister(colormapId, X11ResourceType.Colormap, clientId);
+        return colormapId;
+    }
+
+    public bool TryGetColormap(uint colormapId, out X11ColormapDefinition? colormap)
+    {
+        return _colormapsById.TryGetValue(colormapId, out colormap);
+    }
+
+    public uint CreateCursor(uint clientId)
+    {
+        var cursorId = AllocateClientResourceId(clientId);
+        var cursor = new X11CursorDefinition(cursorId);
+        _cursorsById[cursorId] = cursor;
+        _resourceRegistry.TryRegister(cursorId, X11ResourceType.Cursor, clientId);
+        return cursorId;
+    }
+
+    public bool TryGetCursor(uint cursorId, out X11CursorDefinition? cursor)
+    {
+        return _cursorsById.TryGetValue(cursorId, out cursor);
+    }
+
     public bool CreatePixmap(uint pixmapId, ushort width, ushort height, byte depth)
     {
-        return _renderingState.CreatePixmap(pixmapId, width, height, depth);
+        if (!_renderingState.CreatePixmap(pixmapId, width, height, depth))
+        {
+            return false;
+        }
+
+        var ownerClientId = InferOwnerClientId(pixmapId);
+        if (ownerClientId is null)
+        {
+            _renderingState.FreePixmap(pixmapId);
+            return false;
+        }
+
+        if (!_resourceRegistry.TryRegister(pixmapId, X11ResourceType.Pixmap, ownerClientId.Value))
+        {
+            _renderingState.FreePixmap(pixmapId);
+            return false;
+        }
+
+        return true;
     }
 
     public bool FreePixmap(uint pixmapId)
     {
-        return _renderingState.FreePixmap(pixmapId);
+        if (!_renderingState.FreePixmap(pixmapId))
+        {
+            return false;
+        }
+
+        if (_resourceRegistry.TryGet(pixmapId, out var resource) && resource is not null)
+        {
+            _resourceRegistry.TryRemove(pixmapId, resource.OwnerClientId);
+        }
+        return true;
     }
 
     public bool CreateGraphicsContext(uint graphicsContextId, uint drawableId)
@@ -199,12 +313,39 @@ public sealed class X11DisplayState
             return false;
         }
 
-        return _renderingState.CreateGraphicsContext(graphicsContextId, drawableId);
+        if (!_renderingState.CreateGraphicsContext(graphicsContextId, drawableId))
+        {
+            return false;
+        }
+
+        var ownerClientId = InferOwnerClientId(graphicsContextId);
+        if (ownerClientId is null)
+        {
+            _renderingState.FreeGraphicsContext(graphicsContextId);
+            return false;
+        }
+
+        if (!_resourceRegistry.TryRegister(graphicsContextId, X11ResourceType.GraphicsContext, ownerClientId.Value))
+        {
+            _renderingState.FreeGraphicsContext(graphicsContextId);
+            return false;
+        }
+
+        return true;
     }
 
     public bool FreeGraphicsContext(uint graphicsContextId)
     {
-        return _renderingState.FreeGraphicsContext(graphicsContextId);
+        if (!_renderingState.FreeGraphicsContext(graphicsContextId))
+        {
+            return false;
+        }
+
+        if (_resourceRegistry.TryGet(graphicsContextId, out var resource) && resource is not null)
+        {
+            _resourceRegistry.TryRemove(graphicsContextId, resource.OwnerClientId);
+        }
+        return true;
     }
 
     public bool TryGetGraphicsContext(uint graphicsContextId, out GraphicsContextDefinition? graphicsContext)
@@ -415,6 +556,54 @@ public sealed class X11DisplayState
                     Visuals: [visual])
             ],
             atomTable: X11AtomTable.CreateDefault());
+    }
+
+    private void RegisterCoreResources()
+    {
+        var rootWindow = new X11WindowDefinition(
+            Id: RootWindowId,
+            ParentId: null,
+            X: 0,
+            Y: 0,
+            Width: ScreenWidthInPixels,
+            Height: ScreenHeightInPixels,
+            BorderWidth: 0,
+            Depth: RootDepth);
+
+        _windowsById[RootWindowId] = rootWindow;
+        _resourceRegistry.TryRegister(RootWindowId, X11ResourceType.Window, ownerClientId: 0);
+        _resourceRegistry.TryRegister(DefaultColormapId, X11ResourceType.Colormap, ownerClientId: 0);
+        _colormapsById[DefaultColormapId] = _defaultColormap;
+    }
+
+    private uint AllocateClientResourceId(uint clientId)
+    {
+        if (!_clientsById.TryGetValue(clientId, out var clientState))
+        {
+            throw new InvalidOperationException($"Client {clientId} is not registered.");
+        }
+
+        var resourceId = clientState.AllocateXid();
+        _ownerClientIdByAllocatedResourceId[resourceId] = clientId;
+        return resourceId;
+    }
+
+    private uint? InferOwnerClientId(uint resourceId)
+    {
+        if (_ownerClientIdByAllocatedResourceId.TryGetValue(resourceId, out var trackedClientId))
+        {
+            return trackedClientId;
+        }
+
+        foreach (var clientState in _clientsById.Values)
+        {
+            if ((resourceId & ~clientState.ResourceIdMask) == clientState.ResourceIdBase)
+            {
+                return clientState.ClientId;
+            }
+        }
+
+        return null;
     }
 }
 

@@ -50,11 +50,11 @@ Suggested validation:
 
 ## Phase 2 - Core object model and resource tracking
 
-Status: partially complete.
+Status: complete.
 
 Notes:
-- Implemented: per-client state, XID allocation, root window/screen/visual defaults, atom table, and some focus/event state.
-- Missing relative to the full phase intent: broader server object model coverage for windows beyond root, properties, colormaps, cursors, and richer ownership/state validation.
+- Implemented: per-client state, XID allocation, root window/screen/visual defaults, atom table, resource registry, non-root window storage, property storage, colormaps, cursors, and ownership validation helpers.
+- Later phases still extend and use this model, but the Phase 2 core object-model deliverables themselves are now covered.
 
 Goal:
 - Represent the server-side state needed by real X11 clients.

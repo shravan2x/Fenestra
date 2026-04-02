@@ -7,6 +7,7 @@ public sealed class X11ClientState
     private readonly object _syncLock = new();
     private readonly uint _resourceIdMask;
     private uint _nextResourceIdOffset;
+    private readonly HashSet<uint> _allocatedResourceIds = new();
 
     public X11ClientState(uint clientId, uint resourceIdBase, uint resourceIdMask, ByteOrder byteOrder)
     {
@@ -43,12 +44,21 @@ public sealed class X11ClientState
 
                 if ((resourceId & ~_resourceIdMask) == ResourceIdBase)
                 {
+                    _allocatedResourceIds.Add(resourceId);
                     return resourceId;
                 }
             }
         }
 
         throw new InvalidOperationException("The client resource ID range has been exhausted.");
+    }
+
+    public bool OwnsAllocatedXid(uint resourceId)
+    {
+        lock (_syncLock)
+        {
+            return _allocatedResourceIds.Contains(resourceId);
+        }
     }
 
     public ushort AdvanceSequenceNumber()
