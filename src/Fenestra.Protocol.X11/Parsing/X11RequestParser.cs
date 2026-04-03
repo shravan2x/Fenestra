@@ -26,6 +26,13 @@ public static class X11RequestParser
             : BinaryPrimitives.ReadUInt16BigEndian(buffer);
     }
 
+    public static short ReadInt16(ReadOnlySpan<byte> buffer, ByteOrder byteOrder)
+    {
+        return byteOrder == ByteOrder.LittleEndian
+            ? BinaryPrimitives.ReadInt16LittleEndian(buffer)
+            : BinaryPrimitives.ReadInt16BigEndian(buffer);
+    }
+
     public static string ReadPaddedAsciiString(ReadOnlySpan<byte> buffer, int offset, int length)
     {
         return System.Text.Encoding.ASCII.GetString(buffer.Slice(offset, length));

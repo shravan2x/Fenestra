@@ -77,11 +77,11 @@ Suggested validation:
 
 ## Phase 3 - Request dispatch and minimal usable windowing
 
-Status: partially complete.
+Status: complete.
 
 Notes:
-- Implemented: opcode dispatch, error generation, `InternAtom`, `QueryTree`, `GetGeometry`, `SelectInput`, and some focus-related requests.
-- Missing relative to the full phase intent: `CreateWindow`, `DestroyWindow`, `MapWindow`, `UnmapWindow`, `ConfigureWindow`, `ReparentWindow`, `ChangeProperty`, `GetProperty`, and a real window tree beyond the root window.
+- Implemented: opcode dispatch, error generation, `CreateWindow`, `DestroyWindow`, `MapWindow`, `UnmapWindow`, `ConfigureWindow`, `ReparentWindow`, `ChangeProperty`, `DeleteProperty`, `GetProperty`, `InternAtom`, `QueryTree`, `GetGeometry`, and `SelectInput`.
+- Implemented: non-root window tree mutation, property storage over the wire, and structure/property event infrastructure needed by this phase.
 
 Goal:
 - Support the subset of requests needed for basic clients to create and manage windows.

@@ -159,14 +159,14 @@ public sealed class X11StateAndHandshakeTests
         Assert.True(displayState.TryAddWindow(
             clientState.ClientId,
             new X11WindowDefinition(
-                Id: windowId,
-                ParentId: displayState.RootWindowId,
-                X: 10,
-                Y: 20,
-                Width: 320,
-                Height: 240,
-                BorderWidth: 1,
-                Depth: 24)));
+                windowId,
+                displayState.RootWindowId,
+                10,
+                20,
+                320,
+                240,
+                1,
+                24)));
 
         Assert.True(displayState.TryGetWindow(windowId, out var window));
         Assert.NotNull(window);
@@ -182,6 +182,65 @@ public sealed class X11StateAndHandshakeTests
         Assert.Equal(propertyBytes, propertyValue.Value);
         Assert.True(displayState.DeleteProperty(windowId, wmNameAtom));
         Assert.False(displayState.TryGetProperty(windowId, wmNameAtom, out _));
+    }
+
+    [Fact]
+    public void DisplayState_CanMapConfigureReparentAndDestroyWindowTree()
+    {
+        var displayState = X11DisplayState.CreateDefault();
+        var clientState = displayState.CreateClientState(ByteOrder.LittleEndian);
+        var parentId = clientState.AllocateXid();
+        var childId = clientState.AllocateXid();
+
+        Assert.True(displayState.TryCreateWindow(
+            clientState.ClientId,
+            parentId,
+            displayState.RootWindowId,
+            x: 10,
+            y: 20,
+            width: 320,
+            height: 240,
+            borderWidth: 1,
+            depth: 24));
+        Assert.True(displayState.TryCreateWindow(
+            clientState.ClientId,
+            childId,
+            parentId,
+            x: 5,
+            y: 6,
+            width: 100,
+            height: 80,
+            borderWidth: 0,
+            depth: 24));
+
+        Assert.True(displayState.TryMapWindow(clientState.ClientId, parentId, out var mappedParent));
+        Assert.Equal(X11MapState.Viewable, mappedParent!.MapState);
+        Assert.True(displayState.TryConfigureWindow(
+            clientState.ClientId,
+            parentId,
+            x: 30,
+            y: 40,
+            width: 640,
+            height: 480,
+            borderWidth: 2,
+            out var configuredParent));
+        Assert.Equal((short)30, configuredParent!.X);
+        Assert.Equal((ushort)640, configuredParent.Width);
+        Assert.True(displayState.TryReparentWindow(
+            clientState.ClientId,
+            childId,
+            displayState.RootWindowId,
+            x: 11,
+            y: 12,
+            out var reparentedChild));
+        Assert.Equal(displayState.RootWindowId, reparentedChild!.ParentId);
+        Assert.True(displayState.TryQueryTree(displayState.RootWindowId, out var rootTree, out _));
+        Assert.Contains(parentId, rootTree.ChildWindowIds);
+        Assert.Contains(childId, rootTree.ChildWindowIds);
+
+        Assert.True(displayState.TryDestroyWindow(clientState.ClientId, parentId, out var destroyedIds));
+        Assert.Contains(parentId, destroyedIds);
+        Assert.False(displayState.TryGetWindow(parentId, out _));
     }
 
     [Fact]
@@ -700,6 +759,115 @@ public sealed class X11StateAndHandshakeTests
     [Theory]
     [InlineData(ByteOrder.LittleEndian)]
     [InlineData(ByteOrder.BigEndian)]
+    public async Task RequestLoop_CreateMapConfigurePropertyAndDestroyWindow(ByteOrder byteOrder)
+    {
+        using var cancellationTokenSource = new CancellationTokenSource();
+        var options = new X11ServerOptions(
+            DisplayNumber: 19,
+            ListenAddress: "127.0.0.1",
+            Port: 0,
+            EnableNativeWindows: false);
+        var transport = new TcpDisplayEndpoint(options.ListenAddress, options.Port, options.DisplayNumber);
+        var server = new X11Server(
+            transport,
+            new FakeNativeWindowHost(),
+            X11ServerHandshakeConfiguration.CreateDefault());
+        var serverTask = server.StartAsync(options, cancellationTokenSource.Token);
+
+        await WaitForBoundPortAsync(transport);
+
+        using var client = new TcpClient();
+        await client.ConnectAsync("127.0.0.1", transport.BoundPort);
+
+        await using var stream = client.GetStream();
+        await CompleteHandshakeAsync(stream, byteOrder);
+
+        const uint windowId = 0x0020_0001;
+        var wmNameAtom = await InternAtomAsync(stream, byteOrder, "WM_NAME");
+
+        await stream.WriteAsync(BuildCreateWindowRequest(
+            byteOrder,
+            depth: 24,
+            windowId: windowId,
+            parentId: 1,
+            x: 10,
+            y: 20,
+            width: 320,
+            height: 240,
+            borderWidth: 1));
+        await stream.FlushAsync();
+
+        await stream.WriteAsync(BuildMapWindowRequest(byteOrder, windowId));
+        await stream.FlushAsync();
+
+        await stream.WriteAsync(BuildConfigureWindowRequest(
+            byteOrder,
+            windowId,
+            x: 30,
+            y: 40,
+            width: 640,
+            height: 480));
+        await stream.FlushAsync();
+
+        var propertyBytes = Encoding.ASCII.GetBytes("phase3-window");
+        await stream.WriteAsync(BuildChangePropertyRequest(
+            byteOrder,
+            windowId,
+            wmNameAtom,
+            typeAtom: wmNameAtom,
+            format: 8,
+            propertyBytes));
+        await stream.FlushAsync();
+
+        await stream.WriteAsync(BuildGetPropertyRequest(
+            byteOrder,
+            windowId,
+            wmNameAtom,
+            typeAtom: 0,
+            delete: false));
+        await stream.FlushAsync();
+
+        var propertyReply = await ReadReplyOrErrorAsync(stream, byteOrder);
+        Assert.Equal(1, propertyReply[0]);
+        Assert.Equal((byte)8, propertyReply[1]);
+        var replyLengthWords = ReadUInt32(propertyReply.AsSpan(4, 4), byteOrder);
+        var itemCount = ReadUInt32(propertyReply.AsSpan(16, 4), byteOrder);
+        Assert.True(replyLengthWords >= 0);
+        Assert.True(itemCount > 0);
+
+        await stream.WriteAsync(BuildGetGeometryRequest(byteOrder, windowId));
+        await stream.FlushAsync();
+
+        var geometryReply = await ReadReplyOrErrorAsync(stream, byteOrder);
+        Assert.Equal(1, geometryReply[0]);
+        Assert.Equal((ushort)640, ReadUInt16(geometryReply.AsSpan(16, 2), byteOrder));
+        Assert.Equal((ushort)480, ReadUInt16(geometryReply.AsSpan(18, 2), byteOrder));
+
+        await stream.WriteAsync(BuildQueryTreeRequest(byteOrder, 1));
+        await stream.FlushAsync();
+
+        var treeReply = await ReadReplyOrErrorAsync(stream, byteOrder);
+        Assert.Equal(1, treeReply[0]);
+        Assert.Equal(1u, ReadUInt32(treeReply.AsSpan(8, 4), byteOrder));
+        Assert.Equal((ushort)1, ReadUInt16(treeReply.AsSpan(16, 2), byteOrder));
+        Assert.Equal(windowId, ReadUInt32(treeReply.AsSpan(32, 4), byteOrder));
+
+        await stream.WriteAsync(BuildDestroyWindowRequest(byteOrder, windowId));
+        await stream.FlushAsync();
+
+        await stream.WriteAsync(BuildQueryTreeRequest(byteOrder, 1));
+        await stream.FlushAsync();
+
+        var finalTreeReply = await ReadReplyOrErrorAsync(stream, byteOrder);
+        Assert.Equal((ushort)0, ReadUInt16(finalTreeReply.AsSpan(16, 2), byteOrder));
+
+        cancellationTokenSource.Cancel();
+        await serverTask;
+    }
+
+    [Theory]
+    [InlineData(ByteOrder.LittleEndian)]
+    [InlineData(ByteOrder.BigEndian)]
     public async Task RequestLoop_GetInputFocus_ReturnsRootFocus(ByteOrder byteOrder)
     {
         using var cancellationTokenSource = new CancellationTokenSource();
@@ -905,6 +1073,40 @@ public sealed class X11StateAndHandshakeTests
         _ = await ReadSetupResponseAsync(stream, byteOrder);
     }
 
+    private static async Task<uint> InternAtomAsync(
+        NetworkStream stream,
+        ByteOrder byteOrder,
+        string atomName)
+    {
+        await stream.WriteAsync(BuildInternAtomRequest(byteOrder, onlyIfExists: false, atomName));
+        await stream.FlushAsync();
+
+        var reply = await ReadReplyOrErrorAsync(stream, byteOrder);
+        Assert.Equal(1, reply[0]);
+        return ReadUInt32(reply.AsSpan(8, 4), byteOrder);
+    }
+
+    private static async Task AssertNoImmediateErrorAsync(NetworkStream stream)
+    {
+        using var cancellationTokenSource = new CancellationTokenSource(TimeSpan.FromMilliseconds(75));
+
+        try
+        {
+            var prefix = new byte[1];
+            var bytesRead = await stream.ReadAsync(prefix.AsMemory(0, 1), cancellationTokenSource.Token);
+            if (bytesRead == 0)
+            {
+                return;
+            }
+
+            Assert.NotEqual((byte)0, prefix[0]);
+            throw new InvalidOperationException("Unexpected reply/event bytes were buffered when no immediate response was expected.");
+        }
+        catch (OperationCanceledException)
+        {
+        }
+    }
+
     private static async Task<byte[]> ReadReplyOrErrorAsync(NetworkStream stream, ByteOrder byteOrder)
     {
         var prefix = new byte[8];
@@ -1034,6 +1236,138 @@ public sealed class X11StateAndHandshakeTests
         WriteUInt16(buffer.AsSpan(2, 2), (ushort)(buffer.Length / 4), byteOrder);
         WriteUInt16(buffer.AsSpan(4, 2), (ushort)atomNameBytes.Length, byteOrder);
         atomNameBytes.CopyTo(buffer.AsSpan(8));
+        return buffer;
+    }
+
+    private static byte[] BuildCreateWindowRequest(
+        ByteOrder byteOrder,
+        byte depth,
+        uint windowId,
+        uint parentId,
+        short x,
+        short y,
+        ushort width,
+        ushort height,
+        ushort borderWidth)
+    {
+        var buffer = new byte[28];
+        buffer[0] = 1;
+        buffer[1] = depth;
+        WriteUInt16(buffer.AsSpan(2, 2), 7, byteOrder);
+        WriteUInt32(buffer.AsSpan(4, 4), windowId, byteOrder);
+        WriteUInt32(buffer.AsSpan(8, 4), parentId, byteOrder);
+        WriteUInt16(buffer.AsSpan(12, 2), unchecked((ushort)x), byteOrder);
+        WriteUInt16(buffer.AsSpan(14, 2), unchecked((ushort)y), byteOrder);
+        WriteUInt16(buffer.AsSpan(16, 2), width, byteOrder);
+        WriteUInt16(buffer.AsSpan(18, 2), height, byteOrder);
+        WriteUInt16(buffer.AsSpan(20, 2), borderWidth, byteOrder);
+        WriteUInt16(buffer.AsSpan(22, 2), 1, byteOrder);
+        WriteUInt32(buffer.AsSpan(24, 4), 0, byteOrder);
+        return buffer;
+    }
+
+    private static byte[] BuildDestroyWindowRequest(ByteOrder byteOrder, uint windowId)
+    {
+        return BuildSingleUInt32Request(byteOrder, 4, 0, windowId);
+    }
+
+    private static byte[] BuildMapWindowRequest(ByteOrder byteOrder, uint windowId)
+    {
+        return BuildSingleUInt32Request(byteOrder, 8, 0, windowId);
+    }
+
+    private static byte[] BuildUnmapWindowRequest(ByteOrder byteOrder, uint windowId)
+    {
+        return BuildSingleUInt32Request(byteOrder, 10, 0, windowId);
+    }
+
+    private static byte[] BuildQueryTreeRequest(ByteOrder byteOrder, uint windowId)
+    {
+        return BuildSingleUInt32Request(byteOrder, 15, 0, windowId);
+    }
+
+    private static byte[] BuildGetGeometryRequest(ByteOrder byteOrder, uint drawableId)
+    {
+        return BuildSingleUInt32Request(byteOrder, 14, 0, drawableId);
+    }
+
+    private static byte[] BuildConfigureWindowRequest(
+        ByteOrder byteOrder,
+        uint windowId,
+        int? x = null,
+        int? y = null,
+        uint? width = null,
+        uint? height = null,
+        uint? borderWidth = null)
+    {
+        var valueMask = (x is not null ? 1u << 0 : 0)
+            | (y is not null ? 1u << 1 : 0)
+            | (width is not null ? 1u << 2 : 0)
+            | (height is not null ? 1u << 3 : 0)
+            | (borderWidth is not null ? 1u << 4 : 0);
+
+        var values = new List<uint>();
+        if (x is not null) values.Add(unchecked((uint)x.Value));
+        if (y is not null) values.Add(unchecked((uint)y.Value));
+        if (width is not null) values.Add(width.Value);
+        if (height is not null) values.Add(height.Value);
+        if (borderWidth is not null) values.Add(borderWidth.Value);
+
+        var buffer = new byte[12 + (values.Count * 4)];
+        buffer[0] = 12;
+        buffer[1] = 0;
+        WriteUInt16(buffer.AsSpan(2, 2), (ushort)(buffer.Length / 4), byteOrder);
+        WriteUInt32(buffer.AsSpan(4, 4), windowId, byteOrder);
+        WriteUInt16(buffer.AsSpan(8, 2), (ushort)valueMask, byteOrder);
+
+        var offset = 12;
+        foreach (var value in values)
+        {
+            WriteUInt32(buffer.AsSpan(offset, 4), value, byteOrder);
+            offset += 4;
+        }
+
+        return buffer;
+    }
+
+    private static byte[] BuildChangePropertyRequest(
+        ByteOrder byteOrder,
+        uint windowId,
+        uint propertyAtom,
+        uint typeAtom,
+        byte format,
+        byte[] propertyBytes)
+    {
+        var paddedLength = PadToFourBytes(propertyBytes.Length);
+        var buffer = new byte[24 + paddedLength];
+        buffer[0] = 18;
+        buffer[1] = 0;
+        WriteUInt16(buffer.AsSpan(2, 2), (ushort)(buffer.Length / 4), byteOrder);
+        WriteUInt32(buffer.AsSpan(4, 4), windowId, byteOrder);
+        WriteUInt32(buffer.AsSpan(8, 4), propertyAtom, byteOrder);
+        WriteUInt32(buffer.AsSpan(12, 4), typeAtom, byteOrder);
+        buffer[16] = format;
+        WriteUInt32(buffer.AsSpan(20, 4), (uint)propertyBytes.Length, byteOrder);
+        propertyBytes.CopyTo(buffer.AsSpan(24));
+        return buffer;
+    }
+
+    private static byte[] BuildGetPropertyRequest(
+        ByteOrder byteOrder,
+        uint windowId,
+        uint propertyAtom,
+        uint typeAtom,
+        bool delete)
+    {
+        var buffer = new byte[24];
+        buffer[0] = 20;
+        buffer[1] = delete ? (byte)1 : (byte)0;
+        WriteUInt16(buffer.AsSpan(2, 2), 6, byteOrder);
+        WriteUInt32(buffer.AsSpan(4, 4), windowId, byteOrder);
+        WriteUInt32(buffer.AsSpan(8, 4), propertyAtom, byteOrder);
+        WriteUInt32(buffer.AsSpan(12, 4), typeAtom, byteOrder);
+        WriteUInt32(buffer.AsSpan(16, 4), 0, byteOrder);
+        WriteUInt32(buffer.AsSpan(20, 4), uint.MaxValue, byteOrder);
         return buffer;
     }
 

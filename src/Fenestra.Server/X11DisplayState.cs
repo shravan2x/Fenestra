@@ -130,12 +130,21 @@ public sealed class X11DisplayState
     {
         ArgumentNullException.ThrowIfNull(window);
 
+        if (window.ParentId is not null && !_windowsById.ContainsKey(window.ParentId.Value))
+        {
+            return false;
+        }
+
         if (!_resourceRegistry.TryRegister(window.Id, X11ResourceType.Window, clientId))
         {
             return false;
         }
 
         _windowsById[window.Id] = window;
+        if (window.ParentId is { } parentId)
+        {
+            _windowsById[parentId].ChildWindowIds.Add(window.Id);
+        }
         return true;
     }
 
@@ -162,9 +171,12 @@ public sealed class X11DisplayState
 
     public bool TryQueryTree(uint windowId, out X11QueryTreeResult result, out X11ErrorCode? errorCode)
     {
-        if (windowId == RootWindowId)
+        if (_windowsById.TryGetValue(windowId, out var window))
         {
-            result = new X11QueryTreeResult(RootWindowId, ParentWindowId: 0, ChildWindowIds: []);
+            result = new X11QueryTreeResult(
+                RootWindowId,
+                window.ParentId ?? 0,
+                window.ChildWindowIds.ToArray());
             errorCode = null;
             return true;
         }
@@ -188,6 +200,7 @@ public sealed class X11DisplayState
     public bool DoesClientOwnResource(uint clientId, uint resourceId)
     {
         return _resourceRegistry.TryGet(resourceId, out var resource)
+            && resource is not null
             && resource.OwnerClientId == clientId;
     }
 
@@ -233,12 +246,215 @@ public sealed class X11DisplayState
 
     public bool TryGetProperty(uint windowId, uint atomId, out X11PropertyValue propertyValue)
     {
-        return _propertyStore.TryGetValue((windowId, atomId), out propertyValue);
+        if (_propertyStore.TryGetValue((windowId, atomId), out var value))
+        {
+            propertyValue = value;
+            return true;
+        }
+
+        propertyValue = null!;
+        return false;
     }
 
     public bool DeleteProperty(uint windowId, uint atomId)
     {
         return _propertyStore.Remove((windowId, atomId));
+    }
+
+    public bool TryCreateWindow(
+        uint clientId,
+        uint windowId,
+        uint parentId,
+        short x,
+        short y,
+        ushort width,
+        ushort height,
+        ushort borderWidth,
+        byte depth)
+    {
+        return TryAddWindow(
+            clientId,
+            new X11WindowDefinition(
+                windowId,
+                parentId,
+                x,
+                y,
+                width,
+                height,
+                borderWidth,
+                depth));
+    }
+
+    public bool TryDestroyWindow(uint clientId, uint windowId, out IReadOnlyList<uint> destroyedWindowIds)
+    {
+        destroyedWindowIds = [];
+
+        if (windowId == RootWindowId || !_windowsById.TryGetValue(windowId, out var window))
+        {
+            return false;
+        }
+
+        if (!DoesClientOwnResource(clientId, windowId))
+        {
+            return false;
+        }
+
+        var toDestroy = new List<uint>();
+        CollectDescendants(windowId, toDestroy);
+
+        foreach (var destroyedId in toDestroy)
+        {
+            if (_windowsById.TryGetValue(destroyedId, out var destroyedWindow))
+            {
+                if (destroyedWindow.ParentId is { } parentId && _windowsById.TryGetValue(parentId, out var parentWindow))
+                {
+                    parentWindow.ChildWindowIds.Remove(destroyedId);
+                }
+
+                foreach (var propertyKey in _propertyStore.Keys.Where(key => key.WindowId == destroyedId).ToArray())
+                {
+                    _propertyStore.Remove(propertyKey);
+                }
+
+                _windowsById.Remove(destroyedId);
+                _resourceRegistry.TryRemove(destroyedId, clientId);
+            }
+        }
+
+        destroyedWindowIds = toDestroy;
+        return true;
+    }
+
+    private void CollectDescendants(uint windowId, List<uint> destination)
+    {
+        destination.Add(windowId);
+
+        if (!_windowsById.TryGetValue(windowId, out var window))
+        {
+            return;
+        }
+
+        foreach (var childWindowId in window.ChildWindowIds.ToArray())
+        {
+            CollectDescendants(childWindowId, destination);
+        }
+    }
+
+    public bool TryMapWindow(uint clientId, uint windowId, out X11WindowDefinition? window)
+    {
+        if (!_windowsById.TryGetValue(windowId, out window) || !DoesClientOwnResource(clientId, windowId))
+        {
+            window = null;
+            return false;
+        }
+
+        window.MapState = X11MapState.Viewable;
+        return true;
+    }
+
+    public bool TryUnmapWindow(uint clientId, uint windowId, out X11WindowDefinition? window)
+    {
+        if (!_windowsById.TryGetValue(windowId, out window) || !DoesClientOwnResource(clientId, windowId))
+        {
+            window = null;
+            return false;
+        }
+
+        window.MapState = X11MapState.Unmapped;
+        return true;
+    }
+
+    public bool TryConfigureWindow(
+        uint clientId,
+        uint windowId,
+        int? x,
+        int? y,
+        uint? width,
+        uint? height,
+        uint? borderWidth,
+        out X11WindowDefinition? window)
+    {
+        if (!_windowsById.TryGetValue(windowId, out window) || !DoesClientOwnResource(clientId, windowId))
+        {
+            window = null;
+            return false;
+        }
+
+        if (x is not null)
+        {
+            window.X = checked((short)x.Value);
+        }
+
+        if (y is not null)
+        {
+            window.Y = checked((short)y.Value);
+        }
+
+        if (width is not null)
+        {
+            window.Width = checked((ushort)width.Value);
+        }
+
+        if (height is not null)
+        {
+            window.Height = checked((ushort)height.Value);
+        }
+
+        if (borderWidth is not null)
+        {
+            window.BorderWidth = checked((ushort)borderWidth.Value);
+        }
+
+        return true;
+    }
+
+    public bool TryReparentWindow(
+        uint clientId,
+        uint windowId,
+        uint newParentId,
+        short x,
+        short y,
+        out X11WindowDefinition? window)
+    {
+        if (!_windowsById.TryGetValue(windowId, out window) || !DoesClientOwnResource(clientId, windowId))
+        {
+            window = null;
+            return false;
+        }
+
+        if (!_windowsById.ContainsKey(newParentId) || newParentId == windowId || IsDescendantOf(newParentId, windowId))
+        {
+            return false;
+        }
+
+        if (window.ParentId is { } oldParentId && _windowsById.TryGetValue(oldParentId, out var oldParent))
+        {
+            oldParent.ChildWindowIds.Remove(windowId);
+        }
+
+        _windowsById[newParentId].ChildWindowIds.Add(windowId);
+        window.ParentId = newParentId;
+        window.X = x;
+        window.Y = y;
+        return true;
+    }
+
+    private bool IsDescendantOf(uint candidateWindowId, uint ancestorWindowId)
+    {
+        if (!_windowsById.TryGetValue(ancestorWindowId, out var ancestorWindow))
+        {
+            return false;
+        }
+
+        foreach (var childWindowId in ancestorWindow.ChildWindowIds)
+        {
+            if (childWindowId == candidateWindowId || IsDescendantOf(candidateWindowId, childWindowId))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     public uint CreateColormap(uint clientId)
@@ -521,6 +737,75 @@ public sealed class X11DisplayState
         _eventState.TranslatePendingInputEvents(sequenceNumber);
     }
 
+    public void BroadcastDestroyNotify(ushort sequenceNumber, uint windowId)
+    {
+        _eventState.BroadcastStructureEvent(
+            X11EventKind.DestroyNotify,
+            sequenceNumber,
+            windowId,
+            parentWindowId: windowId);
+    }
+
+    public void BroadcastMapNotify(ushort sequenceNumber, uint windowId)
+    {
+        _eventState.BroadcastStructureEvent(
+            X11EventKind.MapNotify,
+            sequenceNumber,
+            windowId,
+            parentWindowId: windowId);
+    }
+
+    public void BroadcastUnmapNotify(ushort sequenceNumber, uint windowId)
+    {
+        _eventState.BroadcastStructureEvent(
+            X11EventKind.UnmapNotify,
+            sequenceNumber,
+            windowId,
+            parentWindowId: windowId);
+    }
+
+    public void BroadcastReparentNotify(
+        ushort sequenceNumber,
+        uint windowId,
+        uint newParentId,
+        short x,
+        short y)
+    {
+        _eventState.BroadcastStructureEvent(
+            X11EventKind.ReparentNotify,
+            sequenceNumber,
+            windowId,
+            newParentId,
+            x: x,
+            y: y);
+    }
+
+    public void BroadcastConfigureNotify(
+        ushort sequenceNumber,
+        uint windowId,
+        short x,
+        short y,
+        ushort width,
+        ushort height,
+        ushort borderWidth)
+    {
+        _eventState.BroadcastStructureEvent(
+            X11EventKind.ConfigureNotify,
+            sequenceNumber,
+            windowId,
+            parentWindowId: windowId,
+            x: x,
+            y: y,
+            width: width,
+            height: height,
+            borderWidth: borderWidth);
+    }
+
+    public void BroadcastPropertyNotify(ushort sequenceNumber, uint windowId, uint atomId)
+    {
+        _eventState.BroadcastPropertyNotify(sequenceNumber, windowId, atomId);
+    }
+
     public static X11DisplayState CreateDefault()
     {
         var visual = new X11VisualDefinition(
@@ -561,14 +846,15 @@ public sealed class X11DisplayState
     private void RegisterCoreResources()
     {
         var rootWindow = new X11WindowDefinition(
-            Id: RootWindowId,
-            ParentId: null,
-            X: 0,
-            Y: 0,
-            Width: ScreenWidthInPixels,
-            Height: ScreenHeightInPixels,
-            BorderWidth: 0,
-            Depth: RootDepth);
+            RootWindowId,
+            null,
+            0,
+            0,
+            ScreenWidthInPixels,
+            ScreenHeightInPixels,
+            0,
+            RootDepth,
+            X11MapState.Viewable);
 
         _windowsById[RootWindowId] = rootWindow;
         _resourceRegistry.TryRegister(RootWindowId, X11ResourceType.Window, ownerClientId: 0);
@@ -679,12 +965,3 @@ public readonly record struct X11QueryTreeResult(
     uint ParentWindowId,
     IReadOnlyList<uint> ChildWindowIds);
 
-public sealed record X11WindowDefinition(
-    uint Id,
-    uint? ParentId,
-    short X,
-    short Y,
-    ushort Width,
-    ushort Height,
-    ushort BorderWidth,
-    byte Depth);

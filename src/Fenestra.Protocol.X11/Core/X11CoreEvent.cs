@@ -11,6 +11,9 @@ public enum X11EventMask : uint
     EnterWindow = 1u << 4,
     LeaveWindow = 1u << 5,
     PointerMotion = 1u << 6,
+    StructureNotify = 1u << 17,
+    SubstructureNotify = 1u << 19,
+    PropertyChange = 1u << 22,
     Exposure = 1u << 15,
     FocusChange = 1u << 21
 }
@@ -24,7 +27,13 @@ public enum X11EventKind : byte
     MotionNotify = 6,
     FocusIn = 9,
     FocusOut = 10,
-    Expose = 12
+    Expose = 12,
+    DestroyNotify = 17,
+    UnmapNotify = 18,
+    MapNotify = 19,
+    ReparentNotify = 21,
+    ConfigureNotify = 22,
+    PropertyNotify = 28
 }
 
 public readonly record struct QueuedX11Event(
@@ -34,6 +43,8 @@ public readonly record struct QueuedX11Event(
     byte Detail,
     uint RootWindowId,
     uint EventWindowId,
+    uint ChildWindowId,
+    uint RelatedWindowId,
     short RootX,
     short RootY,
     short EventX,
@@ -41,4 +52,8 @@ public readonly record struct QueuedX11Event(
     ushort State,
     ushort Width,
     ushort Height,
-    uint Time);
+    ushort BorderWidth,
+    uint Time,
+    uint AtomId = 0,
+    bool OverrideRedirect = false,
+    bool FromConfigure = false);

@@ -6,6 +6,39 @@ namespace Fenestra.Protocol.X11.Encoding;
 
 public static class X11CoreReplyEncoder
 {
+    public static byte[] EncodeGetPropertyReply(
+        ByteOrder byteOrder,
+        ushort sequenceNumber,
+        byte format,
+        uint propertyType,
+        uint bytesAfter,
+        ReadOnlySpan<byte> propertyData)
+    {
+        var paddedLength = PadToFourBytes(propertyData.Length);
+        var additionalLengthWords = paddedLength / 4;
+        var itemCount = format switch
+        {
+            8 => (uint)propertyData.Length,
+            16 => (uint)(propertyData.Length / 2),
+            32 => (uint)(propertyData.Length / 4),
+            _ => 0u
+        };
+
+        var buffer = new byte[32 + paddedLength];
+        var span = buffer.AsSpan();
+
+        span[0] = 1;
+        span[1] = format;
+        WriteUInt16(span[2..4], sequenceNumber, byteOrder);
+        WriteUInt32(span[4..8], (uint)additionalLengthWords, byteOrder);
+        WriteUInt32(span[8..12], propertyType, byteOrder);
+        WriteUInt32(span[12..16], bytesAfter, byteOrder);
+        WriteUInt32(span[16..20], itemCount, byteOrder);
+        propertyData.CopyTo(span[32..]);
+
+        return buffer;
+    }
+
     public static byte[] EncodeGetInputFocusReply(
         ByteOrder byteOrder,
         ushort sequenceNumber,
@@ -154,5 +187,10 @@ public static class X11CoreReplyEncoder
         {
             BinaryPrimitives.WriteInt16BigEndian(destination, value);
         }
+    }
+
+    private static int PadToFourBytes(int length)
+    {
+        return (length + 3) & ~3;
     }
 }

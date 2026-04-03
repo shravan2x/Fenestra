@@ -8,7 +8,7 @@ public sealed class X11EventState
 {
     private readonly object _syncLock = new();
     private readonly uint _rootWindowId;
-    private readonly Dictionary<uint, X11EventMask> _rootMasksByClientId = new();
+    private readonly Dictionary<(uint ClientId, uint WindowId), X11EventMask> _masksByClientAndWindow = new();
     private readonly Dictionary<uint, Queue<QueuedX11Event>> _eventsByClientId = new();
     private readonly Queue<NativeInputEvent> _pendingInputEvents = new();
 
@@ -25,12 +25,7 @@ public sealed class X11EventState
     {
         lock (_syncLock)
         {
-            if (windowId != _rootWindowId)
-            {
-                return;
-            }
-
-            _rootMasksByClientId[clientId] = (X11EventMask)eventMask;
+            _masksByClientAndWindow[(clientId, windowId)] = (X11EventMask)eventMask;
         }
     }
 
@@ -63,6 +58,8 @@ public sealed class X11EventState
                     Detail: 0,
                     RootWindowId: _rootWindowId,
                     EventWindowId: windowId,
+                    ChildWindowId: windowId,
+                    RelatedWindowId: 0,
                     RootX: x,
                     RootY: y,
                     EventX: x,
@@ -70,7 +67,75 @@ public sealed class X11EventState
                     State: 0,
                     Width: width,
                     Height: height,
+                    BorderWidth: 0,
                     Time: 0));
+        }
+    }
+
+    public void BroadcastStructureEvent(
+        X11EventKind kind,
+        ushort sequenceNumber,
+        uint eventWindowId,
+        uint? parentWindowId = null,
+        short x = 0,
+        short y = 0,
+        ushort width = 0,
+        ushort height = 0,
+        ushort borderWidth = 0)
+    {
+        lock (_syncLock)
+        {
+            EnqueueForSubscribers(
+                eventWindowId,
+                new QueuedX11Event(
+                    Kind: kind,
+                    RequiredMask: X11EventMask.StructureNotify,
+                    SequenceNumber: sequenceNumber,
+                    Detail: 0,
+                    RootWindowId: _rootWindowId,
+                    EventWindowId: eventWindowId,
+                    ChildWindowId: eventWindowId,
+                    RelatedWindowId: parentWindowId ?? 0,
+                    RootX: x,
+                    RootY: y,
+                    EventX: x,
+                    EventY: y,
+                    State: borderWidth,
+                    Width: width,
+                    Height: height,
+                    BorderWidth: borderWidth,
+                    Time: 0));
+        }
+    }
+
+    public void BroadcastPropertyNotify(
+        ushort sequenceNumber,
+        uint windowId,
+        uint atomId)
+    {
+        lock (_syncLock)
+        {
+            EnqueueForSubscribers(
+                windowId,
+                new QueuedX11Event(
+                    Kind: X11EventKind.PropertyNotify,
+                    RequiredMask: X11EventMask.PropertyChange,
+                    SequenceNumber: sequenceNumber,
+                    Detail: 0,
+                    RootWindowId: _rootWindowId,
+                    EventWindowId: windowId,
+                    ChildWindowId: atomId,
+                    RelatedWindowId: 0,
+                    RootX: 0,
+                    RootY: 0,
+                    EventX: 0,
+                    EventY: 0,
+                    State: 0,
+                    Width: 0,
+                    Height: 0,
+                    BorderWidth: 0,
+                    Time: 0,
+                    AtomId: atomId));
         }
     }
 
@@ -113,9 +178,12 @@ public sealed class X11EventState
 
     private void EnqueueForSubscribers(uint windowId, QueuedX11Event serverEvent)
     {
-        foreach (var (clientId, eventMask) in _rootMasksByClientId)
+        foreach (var entry in _masksByClientAndWindow)
         {
-            if (windowId != _rootWindowId || (eventMask & serverEvent.RequiredMask) == 0)
+            var (clientId, selectedWindowId) = entry.Key;
+            var eventMask = entry.Value;
+
+            if (selectedWindowId != windowId || (eventMask & serverEvent.RequiredMask) == 0)
             {
                 continue;
             }
@@ -156,6 +224,8 @@ public sealed class X11EventState
             Detail: (byte)inputEvent.Detail,
             RootWindowId: _rootWindowId,
             EventWindowId: inputEvent.WindowId,
+            ChildWindowId: inputEvent.WindowId,
+            RelatedWindowId: 0,
             RootX: inputEvent.X,
             RootY: inputEvent.Y,
             EventX: inputEvent.X,
@@ -163,6 +233,7 @@ public sealed class X11EventState
             State: inputEvent.State,
             Width: 0,
             Height: 0,
+            BorderWidth: 0,
             Time: 0);
     }
 

@@ -1,6 +1,7 @@
 using Fenestra.Protocol.X11.Core;
 using Fenestra.Protocol.X11.Encoding;
 using Fenestra.Protocol.X11.Parsing;
+using Fenestra.Protocol.X11.Setup;
 
 namespace Fenestra.Server;
 
@@ -28,11 +29,20 @@ internal sealed class X11RequestDispatcher
 
         return header.MajorOpcode switch
         {
+            1 => HandleCreateWindow(clientState, _displayState, header, requestBytes.Span, sequenceNumber),
+            4 => HandleDestroyWindow(clientState, _displayState, header, requestBytes.Span, sequenceNumber),
+            7 => HandleReparentWindow(clientState, _displayState, header, requestBytes.Span, sequenceNumber),
+            8 => HandleMapWindow(clientState, _displayState, header, requestBytes.Span, sequenceNumber),
+            10 => HandleUnmapWindow(clientState, _displayState, header, requestBytes.Span, sequenceNumber),
+            12 => HandleConfigureWindow(clientState, _displayState, header, requestBytes.Span, sequenceNumber),
             42 => HandleSetInputFocus(clientState, _displayState, header, requestBytes.Span, sequenceNumber),
             43 => HandleGetInputFocus(clientState, _displayState, header, requestBytes.Span, sequenceNumber),
             14 => HandleGetGeometry(clientState, _displayState, header, requestBytes.Span, sequenceNumber),
             15 => HandleQueryTree(clientState, _displayState, header, requestBytes.Span, sequenceNumber),
             16 => HandleInternAtom(clientState, _displayState, header, requestBytes.Span, sequenceNumber),
+            18 => HandleChangeProperty(clientState, _displayState, header, requestBytes.Span, sequenceNumber),
+            19 => HandleDeleteProperty(clientState, _displayState, header, requestBytes.Span, sequenceNumber),
+            20 => HandleGetProperty(clientState, _displayState, header, requestBytes.Span, sequenceNumber),
             46 => HandleSelectInput(clientState, _displayState, header, requestBytes.Span, sequenceNumber),
             53 => HandleCreatePixmap(clientState, _displayState, header, requestBytes.Span, sequenceNumber),
             54 => HandleFreePixmap(clientState, _displayState, header, requestBytes.Span, sequenceNumber),
@@ -47,6 +57,424 @@ internal sealed class X11RequestDispatcher
                 badValue: 0,
                 header.MajorOpcode)
         };
+    }
+
+    private static byte[] HandleCreateWindow(
+        X11ClientState clientState,
+        X11DisplayState displayState,
+        X11RequestHeader header,
+        ReadOnlySpan<byte> requestBytes,
+        ushort sequenceNumber)
+    {
+        if (requestBytes.Length < 24)
+        {
+            return X11ErrorEncoder.Encode(
+                clientState.ByteOrder,
+                X11ErrorCode.Length,
+                sequenceNumber,
+                (uint)requestBytes.Length,
+                header.MajorOpcode);
+        }
+
+        var depth = header.MinorOpcode;
+        var windowId = X11RequestParser.ReadUInt32(requestBytes[4..8], clientState.ByteOrder);
+        var parentId = X11RequestParser.ReadUInt32(requestBytes[8..12], clientState.ByteOrder);
+        var x = X11RequestParser.ReadInt16(requestBytes[12..14], clientState.ByteOrder);
+        var y = X11RequestParser.ReadInt16(requestBytes[14..16], clientState.ByteOrder);
+        var width = X11RequestParser.ReadUInt16(requestBytes[16..18], clientState.ByteOrder);
+        var height = X11RequestParser.ReadUInt16(requestBytes[18..20], clientState.ByteOrder);
+        var borderWidth = X11RequestParser.ReadUInt16(requestBytes[20..22], clientState.ByteOrder);
+
+        if (!displayState.TryCreateWindow(
+                clientState.ClientId,
+                windowId,
+                parentId,
+                x,
+                y,
+                width,
+                height,
+                borderWidth,
+                depth == 0 ? displayState.RootDepth : depth))
+        {
+            var errorCode = displayState.TryGetWindow(parentId, out _)
+                ? X11ErrorCode.Window
+                : X11ErrorCode.Match;
+            var badValue = errorCode == X11ErrorCode.Window ? windowId : parentId;
+            return X11ErrorEncoder.Encode(
+                clientState.ByteOrder,
+                errorCode,
+                sequenceNumber,
+                badValue,
+                header.MajorOpcode);
+        }
+
+        return Array.Empty<byte>();
+    }
+
+    private static byte[] HandleDestroyWindow(
+        X11ClientState clientState,
+        X11DisplayState displayState,
+        X11RequestHeader header,
+        ReadOnlySpan<byte> requestBytes,
+        ushort sequenceNumber)
+    {
+        if (requestBytes.Length != 8)
+        {
+            return X11ErrorEncoder.Encode(
+                clientState.ByteOrder,
+                X11ErrorCode.Length,
+                sequenceNumber,
+                (uint)requestBytes.Length,
+                header.MajorOpcode);
+        }
+
+        var windowId = X11RequestParser.ReadUInt32(requestBytes[4..8], clientState.ByteOrder);
+        if (!displayState.TryDestroyWindow(clientState.ClientId, windowId, out var destroyedWindowIds))
+        {
+            return X11ErrorEncoder.Encode(
+                clientState.ByteOrder,
+                X11ErrorCode.Window,
+                sequenceNumber,
+                windowId,
+                header.MajorOpcode);
+        }
+
+        foreach (var destroyedId in destroyedWindowIds)
+        {
+            displayState.BroadcastDestroyNotify(sequenceNumber, destroyedId);
+        }
+
+        return Array.Empty<byte>();
+    }
+
+    private static byte[] HandleReparentWindow(
+        X11ClientState clientState,
+        X11DisplayState displayState,
+        X11RequestHeader header,
+        ReadOnlySpan<byte> requestBytes,
+        ushort sequenceNumber)
+    {
+        if (requestBytes.Length != 12)
+        {
+            return X11ErrorEncoder.Encode(
+                clientState.ByteOrder,
+                X11ErrorCode.Length,
+                sequenceNumber,
+                (uint)requestBytes.Length,
+                header.MajorOpcode);
+        }
+
+        var windowId = X11RequestParser.ReadUInt32(requestBytes[4..8], clientState.ByteOrder);
+        var parentId = X11RequestParser.ReadUInt32(requestBytes[8..12], clientState.ByteOrder);
+        var x = X11RequestParser.ReadInt16(requestBytes[12..14], clientState.ByteOrder);
+        var y = X11RequestParser.ReadInt16(requestBytes[14..16], clientState.ByteOrder);
+
+        if (!displayState.TryReparentWindow(clientState.ClientId, windowId, parentId, x, y, out var window) || window is null)
+        {
+            return X11ErrorEncoder.Encode(
+                clientState.ByteOrder,
+                X11ErrorCode.Window,
+                sequenceNumber,
+                windowId,
+                header.MajorOpcode);
+        }
+
+        displayState.BroadcastReparentNotify(sequenceNumber, window.Id, parentId, x, y);
+        return Array.Empty<byte>();
+    }
+
+    private static byte[] HandleMapWindow(
+        X11ClientState clientState,
+        X11DisplayState displayState,
+        X11RequestHeader header,
+        ReadOnlySpan<byte> requestBytes,
+        ushort sequenceNumber)
+    {
+        if (requestBytes.Length != 8)
+        {
+            return X11ErrorEncoder.Encode(
+                clientState.ByteOrder,
+                X11ErrorCode.Length,
+                sequenceNumber,
+                (uint)requestBytes.Length,
+                header.MajorOpcode);
+        }
+
+        var windowId = X11RequestParser.ReadUInt32(requestBytes[4..8], clientState.ByteOrder);
+        if (!displayState.TryMapWindow(clientState.ClientId, windowId, out var window) || window is null)
+        {
+            return X11ErrorEncoder.Encode(
+                clientState.ByteOrder,
+                X11ErrorCode.Window,
+                sequenceNumber,
+                windowId,
+                header.MajorOpcode);
+        }
+
+        displayState.BroadcastMapNotify(sequenceNumber, window.Id);
+        return Array.Empty<byte>();
+    }
+
+    private static byte[] HandleUnmapWindow(
+        X11ClientState clientState,
+        X11DisplayState displayState,
+        X11RequestHeader header,
+        ReadOnlySpan<byte> requestBytes,
+        ushort sequenceNumber)
+    {
+        if (requestBytes.Length != 8)
+        {
+            return X11ErrorEncoder.Encode(
+                clientState.ByteOrder,
+                X11ErrorCode.Length,
+                sequenceNumber,
+                (uint)requestBytes.Length,
+                header.MajorOpcode);
+        }
+
+        var windowId = X11RequestParser.ReadUInt32(requestBytes[4..8], clientState.ByteOrder);
+        if (!displayState.TryUnmapWindow(clientState.ClientId, windowId, out var window) || window is null)
+        {
+            return X11ErrorEncoder.Encode(
+                clientState.ByteOrder,
+                X11ErrorCode.Window,
+                sequenceNumber,
+                windowId,
+                header.MajorOpcode);
+        }
+
+        displayState.BroadcastUnmapNotify(sequenceNumber, window.Id);
+        return Array.Empty<byte>();
+    }
+
+    private static byte[] HandleConfigureWindow(
+        X11ClientState clientState,
+        X11DisplayState displayState,
+        X11RequestHeader header,
+        ReadOnlySpan<byte> requestBytes,
+        ushort sequenceNumber)
+    {
+        if (requestBytes.Length < 12)
+        {
+            return X11ErrorEncoder.Encode(
+                clientState.ByteOrder,
+                X11ErrorCode.Length,
+                sequenceNumber,
+                (uint)requestBytes.Length,
+                header.MajorOpcode);
+        }
+
+        var windowId = X11RequestParser.ReadUInt32(requestBytes[4..8], clientState.ByteOrder);
+        var valueMask = X11RequestParser.ReadUInt16(requestBytes[8..10], clientState.ByteOrder);
+        var values = ReadConfigureValues(clientState.ByteOrder, valueMask, requestBytes[12..]);
+
+        if (!displayState.TryConfigureWindow(
+                clientState.ClientId,
+                windowId,
+                values.X,
+                values.Y,
+                values.Width,
+                values.Height,
+                values.BorderWidth,
+                out var window) || window is null)
+        {
+            return X11ErrorEncoder.Encode(
+                clientState.ByteOrder,
+                X11ErrorCode.Window,
+                sequenceNumber,
+                windowId,
+                header.MajorOpcode);
+        }
+
+        displayState.BroadcastConfigureNotify(
+            sequenceNumber,
+            window.Id,
+            window.X,
+            window.Y,
+            window.Width,
+            window.Height,
+            window.BorderWidth);
+        return Array.Empty<byte>();
+    }
+
+    private static byte[] HandleChangeProperty(
+        X11ClientState clientState,
+        X11DisplayState displayState,
+        X11RequestHeader header,
+        ReadOnlySpan<byte> requestBytes,
+        ushort sequenceNumber)
+    {
+        if (requestBytes.Length < 24)
+        {
+            return X11ErrorEncoder.Encode(
+                clientState.ByteOrder,
+                X11ErrorCode.Length,
+                sequenceNumber,
+                (uint)requestBytes.Length,
+                header.MajorOpcode);
+        }
+
+        var windowId = X11RequestParser.ReadUInt32(requestBytes[4..8], clientState.ByteOrder);
+        var propertyAtom = X11RequestParser.ReadUInt32(requestBytes[8..12], clientState.ByteOrder);
+        var format = requestBytes[16];
+        var length = X11RequestParser.ReadUInt32(requestBytes[20..24], clientState.ByteOrder);
+        var valueBytes = requestBytes[24..].ToArray();
+
+        var expectedLength = format switch
+        {
+            8 => (int)length,
+            16 => checked((int)length * 2),
+            32 => checked((int)length * 4),
+            _ => -1
+        };
+
+        if (expectedLength < 0 || valueBytes.Length < expectedLength)
+        {
+            return X11ErrorEncoder.Encode(
+                clientState.ByteOrder,
+                X11ErrorCode.Length,
+                sequenceNumber,
+                (uint)requestBytes.Length,
+                header.MajorOpcode);
+        }
+
+        if (valueBytes.Length != X11RequestParser.PadToFourBytes(expectedLength))
+        {
+            return X11ErrorEncoder.Encode(
+                clientState.ByteOrder,
+                X11ErrorCode.Length,
+                sequenceNumber,
+                (uint)requestBytes.Length,
+                header.MajorOpcode);
+        }
+
+        if (!displayState.SetProperty(windowId, propertyAtom, format, valueBytes[..expectedLength]))
+        {
+            return X11ErrorEncoder.Encode(
+                clientState.ByteOrder,
+                X11ErrorCode.Window,
+                sequenceNumber,
+                windowId,
+                header.MajorOpcode);
+        }
+
+        displayState.BroadcastPropertyNotify(sequenceNumber, windowId, propertyAtom);
+        return Array.Empty<byte>();
+    }
+
+    private static byte[] HandleDeleteProperty(
+        X11ClientState clientState,
+        X11DisplayState displayState,
+        X11RequestHeader header,
+        ReadOnlySpan<byte> requestBytes,
+        ushort sequenceNumber)
+    {
+        if (requestBytes.Length != 12)
+        {
+            return X11ErrorEncoder.Encode(
+                clientState.ByteOrder,
+                X11ErrorCode.Length,
+                sequenceNumber,
+                (uint)requestBytes.Length,
+                header.MajorOpcode);
+        }
+
+        var windowId = X11RequestParser.ReadUInt32(requestBytes[4..8], clientState.ByteOrder);
+        var propertyAtom = X11RequestParser.ReadUInt32(requestBytes[8..12], clientState.ByteOrder);
+        if (!displayState.DeleteProperty(windowId, propertyAtom))
+        {
+            return X11ErrorEncoder.Encode(
+                clientState.ByteOrder,
+                X11ErrorCode.Window,
+                sequenceNumber,
+                windowId,
+                header.MajorOpcode);
+        }
+
+        displayState.BroadcastPropertyNotify(sequenceNumber, windowId, propertyAtom);
+        return Array.Empty<byte>();
+    }
+
+    private static byte[] HandleGetProperty(
+        X11ClientState clientState,
+        X11DisplayState displayState,
+        X11RequestHeader header,
+        ReadOnlySpan<byte> requestBytes,
+        ushort sequenceNumber)
+    {
+        if (requestBytes.Length < 24)
+        {
+            return X11ErrorEncoder.Encode(
+                clientState.ByteOrder,
+                X11ErrorCode.Length,
+                sequenceNumber,
+                (uint)requestBytes.Length,
+                header.MajorOpcode);
+        }
+
+        var windowId = X11RequestParser.ReadUInt32(requestBytes[4..8], clientState.ByteOrder);
+        var propertyAtom = X11RequestParser.ReadUInt32(requestBytes[8..12], clientState.ByteOrder);
+
+        if (!displayState.TryGetProperty(windowId, propertyAtom, out var propertyValue))
+        {
+            return X11CoreReplyEncoder.EncodeGetPropertyReply(
+                clientState.ByteOrder,
+                sequenceNumber,
+                0,
+                0,
+                0,
+                []);
+        }
+
+        return X11CoreReplyEncoder.EncodeGetPropertyReply(
+            clientState.ByteOrder,
+            sequenceNumber,
+            propertyValue.Format,
+            propertyValue.AtomId,
+            0,
+            propertyValue.Value);
+    }
+
+    private readonly record struct ConfigureValues(
+        int? X,
+        int? Y,
+        uint? Width,
+        uint? Height,
+        uint? BorderWidth);
+
+    private static ConfigureValues ReadConfigureValues(
+        ByteOrder byteOrder,
+        ushort valueMask,
+        ReadOnlySpan<byte> valueBytes)
+    {
+        int? x = null;
+        int? y = null;
+        uint? width = null;
+        uint? height = null;
+        uint? borderWidth = null;
+        var offset = 0;
+
+        for (var bit = 0; bit < 7 && offset + 4 <= valueBytes.Length; bit++)
+        {
+            if ((valueMask & (1 << bit)) == 0)
+            {
+                continue;
+            }
+
+            var value = X11RequestParser.ReadUInt32(valueBytes[offset..(offset + 4)], byteOrder);
+            offset += 4;
+
+            switch (bit)
+            {
+                case 0: x = unchecked((int)value); break;
+                case 1: y = unchecked((int)value); break;
+                case 2: width = value; break;
+                case 3: height = value; break;
+                case 4: borderWidth = value; break;
+            }
+        }
+
+        return new ConfigureValues(x, y, width, height, borderWidth);
     }
 
     private static byte[] HandleSetInputFocus(
@@ -212,7 +640,7 @@ internal sealed class X11RequestDispatcher
             sequenceNumber,
             displayState.RootWindowId,
             parentWindowId,
-            []);
+            window.ChildWindowIds);
     }
 
     private static byte[] HandleInternAtom(
